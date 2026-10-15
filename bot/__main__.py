@@ -1,4 +1,10 @@
-"""Точка входа: python -m bot"""
+"""Точка входа: python -m bot
+
+Режимы (BOT_MODE):
+* polling — бот сам опрашивает Telegram. Для VPS, Codespaces, Render Background Worker.
+* webhook — Telegram присылает обновления на HTTPS-адрес. Для Render Web Service
+  (в том числе бесплатного: входящий вебхук будит уснувший сервис).
+"""
 
 from __future__ import annotations
 
@@ -13,6 +19,8 @@ from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.client.telegram import TelegramAPIServer
 from aiogram.enums import ParseMode
 from aiogram.types import BotCommand
+from aiogram.webhook.aiohttp_server import SimpleRequestHandler
+from aiohttp import web
 from dotenv import load_dotenv
 
 from .config import ConfigError, Settings
@@ -25,6 +33,44 @@ from .providers import build_providers
 from .redact import setup_logging
 
 log = logging.getLogger("bot")
+
+
+async def run_polling(bot: Bot, dp: Dispatcher) -> None:
+    # Если раньше был включён вебхук, getUpdates не заработает — снимаем его.
+    await bot.delete_webhook(drop_pending_updates=False)
+    await dp.start_polling(bot, handle_as_tasks=True)
+
+
+def build_webhook_app(bot: Bot, dp: Dispatcher, settings: Settings) -> web.Application:
+    app = web.Application()
+
+    async def health(_request: web.Request) -> web.Response:
+        return web.Response(text="ok")
+
+    app.router.add_get("/", health)
+    app.router.add_get("/health", health)
+    SimpleRequestHandler(dispatcher=dp, bot=bot, secret_token=settings.webhook_secret_token,
+                         handle_in_background=True).register(app, path=settings.webhook_path)
+    return app
+
+
+async def run_webhook(bot: Bot, dp: Dispatcher, settings: Settings) -> None:
+    runner = web.AppRunner(build_webhook_app(bot, dp, settings), access_log=None)
+    await runner.setup()
+    site = web.TCPSite(runner, host="0.0.0.0", port=settings.port)
+    await site.start()
+    url = settings.webhook_base_url + settings.webhook_path
+    # Ожидающие обновления не сбрасываем: на Render именно они будят уснувший сервис.
+    await bot.set_webhook(url, secret_token=settings.webhook_secret_token,
+                          allowed_updates=dp.resolve_used_update_types(), drop_pending_updates=False)
+    log.info("Webhook mode: listening on port %d, webhook %s", settings.port, url)
+    await dp.emit_startup(bot=bot)
+    try:
+        await asyncio.Event().wait()
+    finally:
+        # Вебхук при остановке НЕ удаляем: иначе уснувший сервис больше не разбудить.
+        await dp.emit_shutdown(bot=bot)
+        await runner.cleanup()
 
 
 async def main() -> None:
@@ -57,8 +103,12 @@ async def main() -> None:
             BotCommand(command="help", description="Как пользоваться"),
         ])
         me = await bot.get_me()
-        log.info("Bot @%s started, upload limit %d MB", me.username, settings.max_upload_bytes // 2**20)
-        await dp.start_polling(bot, handle_as_tasks=True)
+        log.info("Bot @%s started (%s), upload limit %d MB", me.username, settings.mode,
+                 settings.max_upload_bytes // 2**20)
+        if settings.mode == "webhook":
+            await run_webhook(bot, dp, settings)
+        else:
+            await run_polling(bot, dp)
     finally:
         sweeper.cancel()
         with contextlib.suppress(asyncio.CancelledError):

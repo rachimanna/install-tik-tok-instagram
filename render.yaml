@@ -1,0 +1,23 @@
+# Render Blueprint: Dashboard → New → Blueprint → выбрать этот репозиторий.
+# Бесплатный Web Service засыпает после 15 минут без запросов; входящий вебхук
+# от Telegram будит его (первый ответ после сна приходит с задержкой).
+services:
+  - type: web
+    name: tiktok-instagram-bot
+    runtime: docker
+    plan: free
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /health
+    envVars:
+      - key: BOT_TOKEN
+        sync: false          # Render попросит ввести значение при создании
+      - key: WEBHOOK_SECRET
+        generateValue: true
+      - key: BOT_MODE
+        value: webhook
+      - key: MAX_CONCURRENT_DOWNLOADS
+        value: "2"           # на бесплатном инстансе 512 МБ памяти
+      - key: CACHE_MAX_MB
+        value: "1000"
+      - key: LOG_LEVEL
+        value: INFO

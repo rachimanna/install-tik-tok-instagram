@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -55,6 +56,20 @@ class Settings:
     ytdlp_cookies_file: Path | None = None
     ytdlp_proxy: str | None = None
     log_level: str = "INFO"
+    mode: str = "polling"  # polling | webhook
+    webhook_base_url: str | None = None
+    webhook_secret: str | None = None
+    port: int = 8080
+
+    @property
+    def webhook_path(self) -> str:
+        return "/telegram/webhook"
+
+    @property
+    def webhook_secret_token(self) -> str:
+        """Telegram принимает в secret_token только A-Z, a-z, 0-9, _ и - (до 256 символов)."""
+        seed = self.webhook_secret or self.bot_token
+        return hashlib.sha256(("webhook:" + seed).encode()).hexdigest()
 
     @property
     def jobs_dir(self) -> Path:
@@ -80,7 +95,22 @@ class Settings:
         if cookies_path and not cookies_path.is_file():
             raise ConfigError("YTDLP_COOKIES_FILE указывает на несуществующий файл")
 
+        mode = os.getenv("BOT_MODE", "polling").strip().lower() or "polling"
+        if mode not in ("polling", "webhook"):
+            raise ConfigError("BOT_MODE должно быть polling или webhook")
+        # На Render адрес сервиса задаётся автоматически в RENDER_EXTERNAL_URL.
+        base_url = _opt("WEBHOOK_BASE_URL") or _opt("RENDER_EXTERNAL_URL")
+        if mode == "webhook":
+            if not base_url:
+                raise ConfigError("Для BOT_MODE=webhook задайте WEBHOOK_BASE_URL")
+            if not base_url.startswith("https://"):
+                raise ConfigError("WEBHOOK_BASE_URL должен начинаться с https://")
+
         return cls(
+            mode=mode,
+            webhook_base_url=base_url.rstrip("/") if base_url else None,
+            webhook_secret=_opt("WEBHOOK_SECRET"),
+            port=_int("PORT", 8080),
             bot_token=token,
             telegram_api_url=api_url,
             max_upload_bytes=upload_mb * MB,

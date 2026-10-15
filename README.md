@@ -20,7 +20,7 @@ Telegram-бот на Python 3.11+ и aiogram 3. Пришлите ему ссыл
 
 ```
 bot/
-  __main__.py          запуск: python -m bot
+  __main__.py          запуск: python -m bot (polling или webhook)
   config.py            настройки из переменных окружения
   links.py             поиск ссылки в тексте, проверка домена, определение типа
   net_guard.py         защита от SSRF: проверка каждого редиректа и IP-адресов
@@ -39,6 +39,7 @@ bot/
     __init__.py        список провайдеров: здесь меняется или добавляется загрузчик
 tests/                 тесты (pytest)
 deploy/video-bot.service   пример systemd-юнита
+Dockerfile, render.yaml    деплой на Render
 .devcontainer/         настройки GitHub Codespaces
 ```
 
@@ -50,6 +51,10 @@ deploy/video-bot.service   пример systemd-юнита
 | Переменная | По умолчанию | Назначение |
 |---|---|---|
 | `BOT_TOKEN` | — | токен бота (обязательно) |
+| `BOT_MODE` | polling | `polling` — бот сам опрашивает Telegram; `webhook` — Telegram присылает обновления на HTTPS-адрес (для Render) |
+| `WEBHOOK_BASE_URL` | `RENDER_EXTERNAL_URL` | публичный https-адрес для режима webhook |
+| `WEBHOOK_SECRET` | — | строка, из которой выводится секретный токен вебхука |
+| `PORT` | 8080 | порт HTTP-сервера в режиме webhook (Render задаёт сам) |
 | `MAX_UPLOAD_MB` | 50 | лимит размера файла. Облачный Bot API принимает до 50 МБ |
 | `TELEGRAM_API_URL` | — | адрес своего [Telegram Bot API сервера](https://github.com/tdlib/telegram-bot-api). С ним лимит до 2000 МБ |
 | `MAX_CONCURRENT_DOWNLOADS` | 3 | одновременных загрузок на весь бот |
@@ -66,6 +71,34 @@ deploy/video-bot.service   пример systemd-юнита
 
 Для работы нужен **ffmpeg**: он склеивает видео и звук Instagram без перекодирования, читает
 разрешение и делает превью.
+
+## Запуск на Render
+
+В репозитории есть `Dockerfile` (Python 3.12 + ffmpeg) и `render.yaml` (Blueprint).
+
+1. Зайдите на [dashboard.render.com](https://dashboard.render.com) и подключите GitHub-аккаунт.
+2. **New → Blueprint** → выберите репозиторий `install-tik-tok-instagram`.
+3. Render покажет сервис `tiktok-instagram-bot` и попросит значение `BOT_TOKEN`. Вставьте токен
+   от @BotFather. `WEBHOOK_SECRET` сгенерируется сам.
+4. Нажмите **Apply**. Сборка Docker-образа занимает несколько минут. Когда в логах появится
+   `Webhook mode: listening on port …`, напишите боту `/start`.
+
+Как это работает: на Render бот запускается в режиме `BOT_MODE=webhook`. Адрес сервиса берётся
+из переменной `RENDER_EXTERNAL_URL`, которую Render задаёт сам. При старте бот регистрирует
+вебхук `https://<сервис>.onrender.com/telegram/webhook` с секретным токеном. Запросы без этого
+токена отклоняются (401). Проверка работоспособности доступна по `/health`.
+
+**Бесплатный тариф (`plan: free`):**
+- сервис засыпает после 15 минут без входящих запросов. Новое сообщение будит его, но первый
+  ответ приходит с задержкой (обычно до минуты). Telegram повторяет доставку вебхука, так что
+  сообщение не теряется;
+- после сна или передеплоя кэш файлов пропадает, и кнопки «📁» под старыми видео отвечают,
+  что ссылку нужно прислать заново;
+- 512 МБ памяти, поэтому в `render.yaml` стоит `MAX_CONCURRENT_DOWNLOADS=2`.
+
+Чтобы бот не засыпал, смените в настройках сервиса Instance Type на платный (Starter и выше).
+Можно и создать **Background Worker** с `BOT_MODE=polling`, но воркеры на Render бесплатно не
+доступны. Актуальные цены смотрите на сайте Render.
 
 ## Запуск в GitHub Codespaces
 
@@ -196,4 +229,5 @@ pytest
   лимиты, отказ от повторной отправки слишком большого файла;
 - кнопку «📁» на настоящем aiogram с подменённым API Telegram: отправку документом, переиспользование
   `file_id`, истёкший срок;
-- скрытие токена, cookies и подписанных ссылок в логах.
+- скрытие токена, cookies и подписанных ссылок в логах;
+- режим вебхука: `/health`, отказ без секретного токена, доставку обновления в обработчик.
