@@ -56,6 +56,7 @@ class Settings:
     ytdlp_cookies_file: Path | None = None
     ytdlp_proxy: str | None = None
     log_level: str = "INFO"
+    send_audio: bool = True
     mode: str = "polling"  # polling | webhook
     webhook_base_url: str | None = None
     webhook_secret: str | None = None
@@ -126,4 +127,5 @@ class Settings:
             ytdlp_cookies_file=cookies_path,
             ytdlp_proxy=_opt("YTDLP_PROXY"),
             log_level=os.getenv("LOG_LEVEL", "INFO").strip().upper() or "INFO",
+            send_audio=_bool("SEND_AUDIO", True),
         )

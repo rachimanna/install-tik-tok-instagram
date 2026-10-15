@@ -4,11 +4,11 @@ from __future__ import annotations
 
 from ..config import Settings
 from ..links import ParsedLink
-from .base import (DownloadedMedia, DownloadResult, ErrorCode, MediaKind, Provider,
+from .base import (AudioTrack, DownloadedMedia, DownloadResult, ErrorCode, MediaKind, Provider,
                    ProviderError, Watermark)
 from .ytdlp_provider import YtDlpProvider
 
-__all__ = ["DownloadedMedia", "DownloadResult", "ErrorCode", "MediaKind", "Provider",
+__all__ = ["AudioTrack", "DownloadedMedia", "DownloadResult", "ErrorCode", "MediaKind", "Provider",
            "ProviderError", "Watermark", "YtDlpProvider", "build_providers", "pick_provider"]
 
 

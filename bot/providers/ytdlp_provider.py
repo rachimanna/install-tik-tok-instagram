@@ -457,6 +457,7 @@ class YtDlpProvider:
             thumbnail=media.make_thumbnail(path, path.with_suffix(".thumb.jpg")),
             watermark=classify_watermark(platform, chosen),
             title=processed.get("title"),
+            author=processed.get("uploader") or processed.get("channel") or processed.get("uploader_id"),
         )
 
 

@@ -20,6 +20,7 @@ class ProbeInfo:
     height: int | None = None
     duration: float | None = None
     codec: str | None = None
+    audio_codec: str | None = None
 
 
 def probe(path: Path, timeout: int = 30) -> ProbeInfo | None:
@@ -53,7 +54,8 @@ def probe(path: Path, timeout: int = 30) -> ProbeInfo | None:
             continue
     return ProbeInfo(has_video=video is not None, has_audio=audio is not None,
                      width=width, height=height, duration=duration,
-                     codec=(video or {}).get("codec_name"))
+                     codec=(video or {}).get("codec_name"),
+                     audio_codec=(audio or {}).get("codec_name"))
 
 
 def _rotation(stream: dict) -> int:
@@ -84,6 +86,40 @@ def make_thumbnail(video: Path, target: Path, timeout: int = 30) -> Path | None:
         return target
     target.unlink(missing_ok=True)
     return None
+
+
+# Telegram показывает в музыкальном плеере MP3 и M4A. Эти дорожки копируем как есть;
+# остальные (Opus, Vorbis…) приходится перекодировать в AAC, иначе плеер их не откроет.
+_AUDIO_COPY = {"aac": ".m4a", "mp3": ".mp3", "alac": ".m4a"}
+
+
+def extract_audio(video: Path, target_stem: Path, timeout: int = 120) -> Path | None:
+    """Звуковая дорожка видео отдельным файлом. None — звука нет или ffmpeg не справился."""
+    if not shutil.which("ffmpeg"):
+        return None
+    info = probe(video)
+    if info is None or not info.has_audio:
+        return None
+    codec = (info.audio_codec or "").lower()
+    ext = _AUDIO_COPY.get(codec)
+    if ext:
+        target = target_stem.with_suffix(ext)
+        codec_args = ["-c:a", "copy"]
+    else:
+        target = target_stem.with_suffix(".m4a")
+        codec_args = ["-c:a", "aac", "-b:a", "192k"]
+    cmd = ["ffmpeg", "-v", "error", "-y", "-i", str(video), "-map", "0:a:0", "-vn", "-sn", "-dn",
+           *codec_args, "-map_metadata", "-1", str(target)]
+    try:
+        subprocess.run(cmd, capture_output=True, timeout=timeout, check=True)
+    except (subprocess.SubprocessError, OSError):
+        log.info("Audio extraction failed")
+        target.unlink(missing_ok=True)
+        return None
+    if not target.is_file() or target.stat().st_size == 0:
+        target.unlink(missing_ok=True)
+        return None
+    return target
 
 
 def human_size(size: int | None) -> str:

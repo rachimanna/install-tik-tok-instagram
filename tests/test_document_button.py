@@ -4,11 +4,12 @@ import datetime
 
 from aiogram import Bot
 from aiogram.client.session.base import BaseSession
-from aiogram.methods import SendDocument, SendMediaGroup, SendMessage, SendPhoto, SendVideo
-from aiogram.types import Chat, Document, InputFile, Message, PhotoSize, Video
+from aiogram.methods import SendAudio, SendDocument, SendMediaGroup, SendMessage, SendPhoto, SendVideo
+from aiogram.types import Audio, Chat, Document, InputFile, Message, PhotoSize, Video
 
 from bot.file_store import FileStore
-from bot.providers.base import DownloadedMedia, MediaKind
+from bot.links import Platform
+from bot.providers.base import AudioTrack, DownloadedMedia, MediaKind
 from bot.telegram_io import TelegramSender, send_original
 
 TOKEN = "123456789:" + "A" * 35
@@ -35,11 +36,16 @@ class FakeSession(BaseSession):
         if isinstance(method, SendMediaGroup):
             out = []
             for i, m in enumerate(method.media):
-                extra = ({"document": Document(file_id=f"DOC{i}", file_unique_id=f"d{i}")}
-                         if m.type == "document" else
-                         {"photo": [PhotoSize(file_id="P", file_unique_id="p", width=1, height=1)]})
+                if m.type == "document":
+                    extra = {"document": Document(file_id=f"DOC{i}", file_unique_id=f"d{i}")}
+                elif m.type == "audio":
+                    extra = {"audio": Audio(file_id=f"A{i}", file_unique_id=f"a{i}", duration=2)}
+                else:
+                    extra = {"photo": [PhotoSize(file_id="P", file_unique_id="p", width=1, height=1)]}
                 out.append(Message(message_id=100 + i, date=datetime.datetime.now(), chat=chat, **extra))
             return out
+        if isinstance(method, SendAudio):
+            return method.__returning__(**base, audio=Audio(file_id="A", file_unique_id="a", duration=2))
         if isinstance(method, SendMessage):
             return method.__returning__(**base, text=method.text)
         raise AssertionError(type(method))
@@ -120,3 +126,25 @@ async def test_album_and_documents_group(tmp_path, sample_jpg, sample_mp4):
     assert all(m.type == "document" and m.disable_content_type_detection for r in session.requests
                for m in r.media)
     assert all(p.path is None and p.document_file_id for p in item.parts)
+
+
+async def test_send_audios_single_and_group(tmp_path, sample_mp4):
+    from bot import media
+    session = FakeSession()
+    sender = TelegramSender(Bot(TOKEN, session=session), 1, 7, 30)
+    items = []
+    for n in range(3):
+        audio = media.extract_audio(sample_mp4, tmp_path / f"a{n}")
+        item = DownloadedMedia(sample_mp4, 1, MediaKind.VIDEO, duration=2.0, title="Песня", author="автор")
+        item.audio = AudioTrack(audio, audio.stat().st_size, 2.0, f"tiktok_{n}.m4a")
+        items.append(item)
+
+    await sender.send_audios(Platform.TIKTOK, items[:1])
+    single = session.requests[-1]
+    assert isinstance(single, SendAudio)
+    assert (single.title, single.performer, single.duration) == ("Песня", "автор", 2)
+    assert single.audio.filename == "tiktok_0.m4a"
+
+    await sender.send_audios(Platform.TIKTOK, items)
+    group = session.requests[-1]
+    assert isinstance(group, SendMediaGroup) and [m.type for m in group.media] == ["audio"] * 3

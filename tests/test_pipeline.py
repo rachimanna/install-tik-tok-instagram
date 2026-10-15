@@ -34,7 +34,10 @@ class FakeStatus:
 
 
 class FakeSender:
-    def __init__(self, fail=None):
+    def __init__(self, fail=None, audio_fail=None):
+        self.order = []
+        self.audios = []
+        self.audio_fail = audio_fail
         self.sent = []
         self.albums = []
         self.summaries = []
@@ -45,15 +48,26 @@ class FakeSender:
         if self.fail:
             raise self.fail
         self.sent.append((item.path, caption, token, source_url))
+        self.order.append("single")
 
     async def send_album(self, items):
         assert all(i.path.is_file() for i in items)
         if self.fail:
             raise self.fail
         self.albums.append([i.kind for i in items])
+        self.order.append("album")
 
     async def send_summary(self, text, token, source_url):
         self.summaries.append((text, token, source_url))
+        self.order.append("summary")
+
+    async def send_audios(self, platform, items):
+        for i in items:
+            assert i.audio.path.is_file()
+        if self.audio_fail:
+            raise self.audio_fail
+        self.audios.append([i.audio for i in items])
+        self.order.append("audio")
 
 
 class FakeProvider:
@@ -276,3 +290,46 @@ _real_sleep = asyncio.sleep
 
 async def _no_sleep(delay, *a, **k):
     await _real_sleep(0)
+
+
+async def test_video_then_its_audio(tmp_path, sample_mp4):
+    sender = FakeSender()
+    p = make_pipeline(tmp_path, FakeProvider(ok_behaviour(), sample_mp4))
+    _, log = await run(p, TT_URL, sender)
+    assert sender.order == ["single", "audio"]
+    audio = sender.audios[0][0]
+    assert audio.filename.endswith(".m4a") and audio.filename.startswith("tiktok_")
+    assert audio.duration == 2.0
+    assert log[-1] == ("finish", None, None)
+    assert jobs_empty(p)  # аудиофайл удалён вместе с папкой задачи
+
+
+async def test_album_audio_only_for_videos(tmp_path, sample_mp4):
+    kinds = [MediaKind.VIDEO, MediaKind.PHOTO, MediaKind.VIDEO]
+    sender = FakeSender()
+    p = make_pipeline(tmp_path, FakeProvider(ok_behaviour(kinds=kinds), sample_mp4))
+    await run(p, "https://www.instagram.com/p/Cabc/", sender)
+    assert sender.order == ["album", "summary", "audio"]
+    assert len(sender.audios[0]) == 2
+
+
+async def test_audio_failure_does_not_break_video(tmp_path, sample_mp4):
+    from bot.pipeline import SendFailed
+    sender = FakeSender(audio_fail=SendFailed())
+    p = make_pipeline(tmp_path, FakeProvider(ok_behaviour(), sample_mp4))
+    _, log = await run(p, TT_URL, sender)
+    assert sender.order == ["single"] and log[-1] == ("finish", None, None)
+
+
+async def test_audio_can_be_disabled(tmp_path, sample_mp4):
+    sender = FakeSender()
+    p = make_pipeline(tmp_path, FakeProvider(ok_behaviour(), sample_mp4), send_audio=False)
+    await run(p, TT_URL, sender)
+    assert sender.order == ["single"] and sender.audios == []
+
+
+async def test_photo_has_no_audio(tmp_path, sample_mp4):
+    sender = FakeSender()
+    p = make_pipeline(tmp_path, FakeProvider(ok_behaviour(kinds=[MediaKind.PHOTO]), sample_mp4))
+    await run(p, TT_URL, sender)
+    assert sender.order == ["single"]

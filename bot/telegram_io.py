@@ -11,10 +11,11 @@ from typing import TypeVar
 from aiogram import Bot
 from aiogram.exceptions import (TelegramBadRequest, TelegramEntityTooLarge, TelegramNetworkError,
                                 TelegramRetryAfter)
-from aiogram.types import (FSInputFile, InputMediaDocument, InputMediaPhoto, InputMediaVideo, Message,
+from aiogram.types import (FSInputFile, InputMediaAudio, InputMediaDocument, InputMediaPhoto,
+                           InputMediaVideo, Message,
                            ReplyParameters)
 
-from . import keyboards
+from . import keyboards, texts
 from .file_store import FileStore
 from .pipeline import SendFailed, SendTooLarge
 from .providers import DownloadedMedia, MediaKind
@@ -141,6 +142,29 @@ class TelegramSender:
 
         await with_retries(call)
 
+    async def send_audios(self, platform, items: list[DownloadedMedia]) -> None:
+        for chunk in _chunks(items, ALBUM_SIZE):
+            if len(chunk) == 1:
+                item = chunk[0]
+
+                async def call_one() -> Message:
+                    return await self.bot.send_audio(
+                        chat_id=self.chat_id, audio=_audio_file(platform, item, 1),
+                        **_audio_meta(platform, item), reply_parameters=self._reply(),
+                        request_timeout=self.timeout)
+
+                await with_retries(call_one)
+                continue
+
+            async def call_group(chunk=chunk) -> list[Message]:
+                return await self.bot.send_media_group(
+                    chat_id=self.chat_id,
+                    media=[InputMediaAudio(media=_audio_file(platform, item, n), **_audio_meta(platform, item))
+                           for n, item in enumerate(chunk, start=1)],
+                    reply_parameters=self._reply(), request_timeout=self.timeout)
+
+            await with_retries(call_group)
+
     async def _send_one(self, item: DownloadedMedia, caption: str | None, markup) -> None:
         common = dict(chat_id=self.chat_id, caption=caption, reply_markup=markup,
                       reply_parameters=self._reply(), request_timeout=self.timeout)
@@ -163,6 +187,19 @@ class TelegramSender:
                 disable_content_type_detection=True, **common)
 
         await with_retries(call)
+
+
+def _audio_file(platform, item: DownloadedMedia, n: int) -> FSInputFile:
+    return FSInputFile(item.audio.path, filename=item.audio.filename)
+
+
+def _audio_meta(platform, item: DownloadedMedia) -> dict:
+    return dict(
+        title=texts.audio_title(platform, item),
+        performer=(item.author or platform.title)[:64],
+        duration=int(round(item.audio.duration)) if item.audio.duration else None,
+        thumbnail=FSInputFile(item.thumbnail) if item.thumbnail else None,
+    )
 
 
 def _input_media(item: DownloadedMedia) -> InputMediaPhoto | InputMediaVideo:

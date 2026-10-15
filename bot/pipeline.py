@@ -18,13 +18,14 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
-from . import texts
+from . import media, texts
 from .config import Settings
 from .file_store import FileStore
 from .limits import UserLimiter
 from .links import LinkError, ParsedLink, extract_url, parse_link
 from .net_guard import Fetcher, HostChecker, ResolveError, UnsafeAddressError, ensure_public_host, resolve_link
-from .providers import DownloadedMedia, DownloadResult, ErrorCode, Provider, ProviderError, pick_provider
+from .providers import (AudioTrack, DownloadedMedia, DownloadResult, ErrorCode, MediaKind, Provider,
+                        ProviderError, pick_provider)
 from .redact import redact_url
 
 log = logging.getLogger(__name__)
@@ -49,6 +50,9 @@ class Sender(Protocol):
 
     async def send_summary(self, text: str, token: str | None, source_url: str) -> None:
         """Сообщение с описанием альбома и кнопками."""
+
+    async def send_audios(self, platform, items: list[DownloadedMedia]) -> None:
+        """Звук из видео аудиофайлами (у каждого элемента заполнено поле audio)."""
 
 
 class SendTooLarge(Exception):
@@ -182,6 +186,8 @@ class Pipeline:
         notes = texts.summary_notes(result.skipped_unsupported, result.skipped_too_large,
                                     result.truncated, self.settings.max_upload_bytes,
                                     self.settings.max_items_per_post)
+        if self.settings.send_audio:
+            await self._extract_audio(result)
         stored = self.store.put([(item.path, _filename(result, item, i))
                                  for i, item in enumerate(items, start=1)])
         for item, part in zip(items, stored.parts):
@@ -190,16 +196,47 @@ class Pipeline:
             if len(items) == 1:
                 caption = texts.single_caption(result.platform, items[0])
                 await sender.send_single(items[0], caption, stored.token, source)
-                return notes
-            await sender.send_album(items)
-            summary = texts.album_caption(result.platform, items)
-            if notes:
-                summary += "\n\n" + notes
-            await sender.send_summary(summary, stored.token, source)
-            return None
+                status_text = notes
+            else:
+                await sender.send_album(items)
+                summary = texts.album_caption(result.platform, items)
+                if notes:
+                    summary += "\n\n" + notes
+                await sender.send_summary(summary, stored.token, source)
+                status_text = None
         except BaseException:
             self.store.discard(stored.token)
             raise
+        await self._send_audio(result, sender)
+        return status_text
+
+    async def _extract_audio(self, result: DownloadResult) -> None:
+        limit = self.settings.max_upload_bytes
+        for index, item in enumerate(result.items, start=1):
+            if item.kind is not MediaKind.VIDEO:
+                continue
+            stem = item.path.with_name(f"audio_{index:02d}")
+            path = await asyncio.to_thread(media.extract_audio, item.path, stem)
+            if path is None:
+                continue
+            size = path.stat().st_size
+            if size > limit:
+                path.unlink(missing_ok=True)
+                continue
+            name = _filename(result, item, index)
+            item.audio = AudioTrack(path, size, item.duration, Path(name).stem + path.suffix)
+
+    async def _send_audio(self, result: DownloadResult, sender: Sender) -> None:
+        """Звук — дополнение: если он не отправился, видео у пользователя уже есть."""
+        with_audio = [i for i in result.items if i.audio is not None]
+        if not with_audio:
+            return
+        try:
+            await sender.send_audios(result.platform, with_audio)
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001
+            log.warning("Audio sending failed", exc_info=True)
 
 
 def _filename(result: DownloadResult, item: DownloadedMedia, index: int) -> str:

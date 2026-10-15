@@ -12,6 +12,7 @@ START = (
     "👋 Привет! Отправь ссылку на видео из TikTok или Instagram.\n\n"
     "🎬 Reels и видео\n"
     "🖼 Фото и карусели\n"
+    "🎵 Звук из видео отдельным аудиофайлом\n"
     "✨ TikTok без водяного знака — когда доступна чистая версия\n"
     "📱 TikTok Stories — если они доступны для скачивания\n"
     "📁 Отправка исходного файла"
@@ -21,8 +22,9 @@ HELP = (
     "<b>Как пользоваться</b>\n\n"
     "1. В TikTok или Instagram нажми «Поделиться» → «Копировать ссылку».\n"
     "2. Пришли ссылку сюда сообщением.\n"
-    "3. Получи видео или фото. Кнопка «📁 Скачать оригинальным файлом» пришлёт те же "
-    "файлы документами — без сжатия Telegram.\n\n"
+    "3. Получи видео или фото. Следом за видео придёт его звук аудиофайлом. "
+    "Кнопка «📁 Скачать оригинальным файлом» пришлёт те же файлы документами — "
+    "без сжатия Telegram.\n\n"
     "<b>Поддерживается</b>\n"
     "• TikTok: видео и фото-посты (полные и короткие ссылки vm.tiktok.com), сторис — "
     "пока она доступна и если TikTok отдаёт её загрузчику\n"
@@ -169,6 +171,11 @@ def album_caption(platform: Platform, items: list[DownloadedMedia]) -> str:
             line += " · ⚠️ с водяным знаком"
         lines.append(line)
     return "\n".join(lines)
+
+
+def audio_title(platform: Platform, item: DownloadedMedia) -> str:
+    title = (item.title or "").strip() or f"Звук из {platform.title}"
+    return title[:64]
 
 
 def summary_notes(skipped_unsupported: int, skipped_too_large: list[int | None], truncated: bool,

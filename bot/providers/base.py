@@ -45,6 +45,14 @@ class ProviderError(Exception):
 
 
 @dataclass
+class AudioTrack:
+    path: Path
+    size: int
+    duration: float | None = None
+    filename: str = "audio.m4a"  # имя файла для пользователя
+
+
+@dataclass
 class DownloadedMedia:
     path: Path
     size: int
@@ -55,7 +63,9 @@ class DownloadedMedia:
     thumbnail: Path | None = None
     watermark: Watermark = Watermark.NOT_APPLICABLE
     title: str | None = None
+    author: str | None = None
     image_codec: str | None = None  # для фото: mjpeg / png / webp …
+    audio: AudioTrack | None = None  # звук из видео (добавляет pipeline, если SEND_AUDIO)
 
 
 @dataclass
