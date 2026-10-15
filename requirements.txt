@@ -1,0 +1,4 @@
+aiogram==3.31.0
+aiohttp>=3.11,<3.15
+yt-dlp[default,curl-cffi]==2026.8.19
+python-dotenv==1.2.4
