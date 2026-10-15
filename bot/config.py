@@ -48,7 +48,7 @@ class Settings:
     max_tasks_per_user: int = 1
     download_timeout: int = 180
     send_timeout: int = 300
-    max_items_per_post: int = 10
+    max_items_per_post: int = 20
     file_ttl_seconds: int = 3600
     cache_max_bytes: int = 2000 * MB
     work_dir: Path = Path("./data")
@@ -118,7 +118,7 @@ class Settings:
             max_tasks_per_user=_int("MAX_TASKS_PER_USER", 1),
             download_timeout=_int("DOWNLOAD_TIMEOUT_SECONDS", 180, minimum=10),
             send_timeout=_int("SEND_TIMEOUT_SECONDS", 300, minimum=10),
-            max_items_per_post=_int("MAX_ITEMS_PER_POST", 10),
+            max_items_per_post=_int("MAX_ITEMS_PER_POST", 20),
             file_ttl_seconds=_int("FILE_TTL_MINUTES", 60) * 60,
             cache_max_bytes=_int("CACHE_MAX_MB", 2000) * MB,
             work_dir=Path(os.getenv("WORK_DIR", "./data")).expanduser().resolve(),

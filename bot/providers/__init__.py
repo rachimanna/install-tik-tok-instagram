@@ -4,12 +4,12 @@ from __future__ import annotations
 
 from ..config import Settings
 from ..links import ParsedLink
-from .base import (DownloadedVideo, DownloadResult, ErrorCode, Provider, ProviderError,
-                   Watermark)
+from .base import (DownloadedMedia, DownloadResult, ErrorCode, MediaKind, Provider,
+                   ProviderError, Watermark)
 from .ytdlp_provider import YtDlpProvider
 
-__all__ = ["DownloadedVideo", "DownloadResult", "ErrorCode", "Provider", "ProviderError",
-           "Watermark", "YtDlpProvider", "build_providers", "pick_provider"]
+__all__ = ["DownloadedMedia", "DownloadResult", "ErrorCode", "MediaKind", "Provider",
+           "ProviderError", "Watermark", "YtDlpProvider", "build_providers", "pick_provider"]
 
 
 def build_providers(settings: Settings) -> list[Provider]:

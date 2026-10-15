@@ -6,11 +6,12 @@ from html import escape
 
 from .links import LinkErrorCode, Platform
 from .media import human_size
-from .providers.base import DownloadedVideo, ErrorCode, Watermark
+from .providers.base import DownloadedMedia, ErrorCode, MediaKind, Watermark
 
 START = (
     "👋 Привет! Отправь ссылку на видео из TikTok или Instagram.\n\n"
     "🎬 Reels и видео\n"
+    "🖼 Фото и карусели\n"
     "✨ TikTok без водяного знака — когда доступна чистая версия\n"
     "📱 TikTok Stories — если они доступны для скачивания\n"
     "📁 Отправка исходного файла"
@@ -20,12 +21,12 @@ HELP = (
     "<b>Как пользоваться</b>\n\n"
     "1. В TikTok или Instagram нажми «Поделиться» → «Копировать ссылку».\n"
     "2. Пришли ссылку сюда сообщением.\n"
-    "3. Получи видео. Кнопка «📁 Скачать оригинальным файлом» пришлёт тот же файл "
-    "документом — без сжатия Telegram.\n\n"
+    "3. Получи видео или фото. Кнопка «📁 Скачать оригинальным файлом» пришлёт те же "
+    "файлы документами — без сжатия Telegram.\n\n"
     "<b>Поддерживается</b>\n"
-    "• TikTok: видео (полные и короткие ссылки vm.tiktok.com), сторис — пока она "
-    "доступна и если TikTok отдаёт её загрузчику\n"
-    "• Instagram: Reels и видео из публичных публикаций, включая карусели\n\n"
+    "• TikTok: видео и фото-посты (полные и короткие ссылки vm.tiktok.com), сторис — "
+    "пока она доступна и если TikTok отдаёт её загрузчику\n"
+    "• Instagram: Reels, видео и фото из публичных публикаций, включая карусели\n\n"
     "<b>Не поддерживается</b>\n"
     "• закрытые аккаунты и удалённые публикации\n"
     "• сторис Instagram\n\n"
@@ -44,6 +45,7 @@ NO_LINK = "🤔 Не вижу ссылки. Отправь ссылку на в�
 BUSY = "⏳ Подожди, пока закончится предыдущая загрузка, и пришли ссылку снова."
 
 BTN_DOCUMENT = "📁 Скачать оригинальным файлом"
+BTN_DOCUMENTS = "📁 Скачать оригиналы файлами"
 BTN_SOURCE = "🔗 Открыть источник"
 BTN_HELP = "❓ Как пользоваться"
 
@@ -66,7 +68,6 @@ LINK_ERRORS: dict[LinkErrorCode, str] = {
     LinkErrorCode.INSTAGRAM_STORY: (
         "😔 Сторис Instagram не поддерживаются: для них нужен вход в аккаунт."
     ),
-    LinkErrorCode.TIKTOK_PHOTO: "🖼 Это фото-публикация TikTok — в ней нет видео.",
 }
 
 RESOLVE_ERRORS = {
@@ -91,8 +92,8 @@ def provider_error(code: ErrorCode, platform: Platform, limit: int, size: int | 
                 "Возможно, она закрыта или ограничена по возрасту.")
     if code is ErrorCode.BLOCKED:
         return f"🚧 {platform.title} временно ограничил доступ серверу бота. Попробуй позже."
-    if code is ErrorCode.NO_VIDEO:
-        return "🖼 В этой публикации нет видео (например, только фото)."
+    if code is ErrorCode.NO_MEDIA:
+        return "😔 В этой публикации не нашлось ни видео, ни фото, которые можно скачать."
     if code is ErrorCode.NO_CLEAN_VERSION:
         return "😔 Чистая версия без водяного знака для этого видео недоступна."
     if code is ErrorCode.TOO_LARGE:
@@ -112,31 +113,71 @@ SEND_FAILED = "😔 Видео скачалось, но Telegram не приня
 UNEXPECTED = "😔 Что-то пошло не так. Попробуй ещё раз позже."
 
 
-def video_caption(platform: Platform, video: DownloadedVideo, index: int, total: int) -> str:
-    icon = "🎵" if platform is Platform.TIKTOK else "📸"
-    parts = [f"{icon} <b>{platform.title}</b>"]
-    if total > 1:
-        parts.append(f"{index}/{total}")
-    if video.width and video.height:
-        parts.append(f"{video.width}×{video.height}")
-    parts.append(human_size(video.size))
-    lines = [" · ".join(parts)]
-    if video.watermark is Watermark.CLEAN:
-        lines.append("✨ Без водяного знака")
-    elif video.watermark is Watermark.WATERMARKED:
-        lines.append("⚠️ Чистая версия недоступна — это видео с водяным знаком")
-    elif video.watermark is Watermark.UNKNOWN:
-        lines.append("ℹ️ Не удалось подтвердить, что водяного знака нет")
+def _item_parts(item: DownloadedMedia) -> list[str]:
+    parts = []
+    if item.width and item.height:
+        parts.append(f"{item.width}×{item.height}")
+    parts.append(human_size(item.size))
+    return parts
+
+
+def _watermark_line(item: DownloadedMedia) -> str | None:
+    if item.watermark is Watermark.CLEAN:
+        return "✨ Без водяного знака"
+    if item.watermark is Watermark.WATERMARKED:
+        return "⚠️ Чистая версия недоступна — это видео с водяным знаком"
+    if item.watermark is Watermark.UNKNOWN:
+        return "ℹ️ Не удалось подтвердить, что водяного знака нет"
+    return None
+
+
+def _icon(item: DownloadedMedia) -> str:
+    return "🖼" if item.kind is MediaKind.PHOTO else "🎬"
+
+
+def single_caption(platform: Platform, item: DownloadedMedia) -> str:
+    lines = [" · ".join([f"{_icon(item)} <b>{platform.title}</b>", *_item_parts(item)])]
+    if line := _watermark_line(item):
+        lines.append(line)
     return "\n".join(lines)
 
 
-def summary_notes(skipped_non_video: int, skipped_too_large: list[int | None], truncated: bool,
+def _count(n: int, one: str, few: str, many: str) -> str:
+    if n % 10 == 1 and n % 100 != 11:
+        word = one
+    elif 2 <= n % 10 <= 4 and not 12 <= n % 100 <= 14:
+        word = few
+    else:
+        word = many
+    return f"{n} {word}"
+
+
+def album_caption(platform: Platform, items: list[DownloadedMedia]) -> str:
+    videos = sum(1 for i in items if i.kind is MediaKind.VIDEO)
+    photos = len(items) - videos
+    counts = []
+    if videos:
+        counts.append(_count(videos, "видео", "видео", "видео"))
+    if photos:
+        counts.append(_count(photos, "фото", "фото", "фото"))
+    lines = [f"📦 <b>{platform.title}</b> · {', '.join(counts)}", ""]
+    for index, item in enumerate(items, start=1):
+        line = f"{index}. {_icon(item)} " + " · ".join(_item_parts(item))
+        if item.watermark is Watermark.CLEAN:
+            line += " · ✨ без водяного знака"
+        elif item.watermark is Watermark.WATERMARKED:
+            line += " · ⚠️ с водяным знаком"
+        lines.append(line)
+    return "\n".join(lines)
+
+
+def summary_notes(skipped_unsupported: int, skipped_too_large: list[int | None], truncated: bool,
                   limit: int, max_items: int) -> str | None:
     notes = []
     if skipped_too_large:
-        notes.append(f"📦 Пропущено видео больше {human_size(limit)}: {len(skipped_too_large)}")
-    if skipped_non_video:
-        notes.append(f"🖼 Пропущено фото: {skipped_non_video}")
+        notes.append(f"📦 Пропущено файлов больше {human_size(limit)}: {len(skipped_too_large)}")
+    if skipped_unsupported:
+        notes.append(f"⚠️ Не удалось скачать элементов: {skipped_unsupported}")
     if truncated:
         notes.append(f"✂️ Отправлены только первые {max_items} элементов публикации")
     return "\n".join(notes) or None

@@ -1,15 +1,14 @@
 """Кнопка «📁 Скачать оригинальным файлом» на настоящем aiogram с подменённой сессией API."""
 
 import datetime
-from pathlib import Path
 
 from aiogram import Bot
 from aiogram.client.session.base import BaseSession
-from aiogram.methods import SendDocument, SendVideo
-from aiogram.types import Chat, Document, InputFile, Message, Video
+from aiogram.methods import SendDocument, SendMediaGroup, SendMessage, SendPhoto, SendVideo
+from aiogram.types import Chat, Document, InputFile, Message, PhotoSize, Video
 
 from bot.file_store import FileStore
-from bot.providers.base import DownloadedVideo
+from bot.providers.base import DownloadedMedia, MediaKind
 from bot.telegram_io import TelegramSender, send_original
 
 TOKEN = "123456789:" + "A" * 35
@@ -30,6 +29,19 @@ class FakeSession(BaseSession):
         if isinstance(method, SendDocument):
             doc = Document(file_id="DOC_FILE_ID", file_unique_id="d")
             return method.__returning__(**base, document=doc)
+        if isinstance(method, SendPhoto):
+            return method.__returning__(**base, photo=[PhotoSize(file_id="P", file_unique_id="p",
+                                                                 width=1, height=1)])
+        if isinstance(method, SendMediaGroup):
+            out = []
+            for i, m in enumerate(method.media):
+                extra = ({"document": Document(file_id=f"DOC{i}", file_unique_id=f"d{i}")}
+                         if m.type == "document" else
+                         {"photo": [PhotoSize(file_id="P", file_unique_id="p", width=1, height=1)]})
+                out.append(Message(message_id=100 + i, date=datetime.datetime.now(), chat=chat, **extra))
+            return out
+        if isinstance(method, SendMessage):
+            return method.__returning__(**base, text=method.text)
         raise AssertionError(type(method))
 
     async def stream_content(self, *a, **k):
@@ -46,10 +58,11 @@ async def test_video_then_document_button(tmp_path, sample_mp4):
     store.reset_dir()
     src = tmp_path / "v.mp4"
     src.write_bytes(sample_mp4.read_bytes())
-    item = store.put(src, "tiktok_v.mp4")
+    item = store.put([(src, "tiktok_v.mp4")])
+    part = item.parts[0]
 
-    video = DownloadedVideo(item.path, item.size, 360, 640, 2.0)
-    await TelegramSender(bot, 1, 5, 30).send_video(video, "cap", item.token, "https://vm.tiktok.com/x/")
+    video = DownloadedMedia(part.path, part.size, MediaKind.VIDEO, 360, 640, 2.0)
+    await TelegramSender(bot, 1, 5, 30).send_single(video, "cap", item.token, "https://vm.tiktok.com/x/")
     sent = session.requests[0]
     assert isinstance(sent, SendVideo) and sent.supports_streaming
     assert isinstance(sent.video, InputFile)
@@ -61,7 +74,7 @@ async def test_video_then_document_button(tmp_path, sample_mp4):
     assert isinstance(doc_req, SendDocument) and isinstance(doc_req.document, InputFile)
     assert doc_req.disable_content_type_detection is True
     assert doc_req.document.filename == "tiktok_v.mp4"
-    assert not Path(item.path or tmp_path / "gone").exists()  # локальный файл удалён
+    assert part.path is None  # локальный файл удалён
 
     # Повторное нажатие: используется сохранённый file_id.
     assert await send_original(bot, store, item.token, 1, 30) == "ok"
@@ -72,3 +85,38 @@ async def test_expired_button(tmp_path):
     bot = Bot(TOKEN, session=FakeSession())
     store = FileStore(tmp_path / "cache", 600, 10**9)
     assert await send_original(bot, store, "missing", 1, 30) == "expired"
+
+
+async def test_album_and_documents_group(tmp_path, sample_jpg, sample_mp4):
+    session = FakeSession()
+    bot = Bot(TOKEN, session=session)
+    store = FileStore(tmp_path / "cache", 600, 10**9)
+    store.reset_dir()
+    sources = []
+    for i in range(12):
+        src = tmp_path / f"{i}.jpg"
+        src.write_bytes(sample_jpg.read_bytes())
+        sources.append((src, f"tiktok_{i}.jpg"))
+    item = store.put(sources)
+    photos = [DownloadedMedia(p.path, p.size, MediaKind.PHOTO, 1080, 1350, image_codec="mjpeg")
+              for p in item.parts]
+    # Одно фото в WebP — Telegram не примет его как фото, уйдёт файлом.
+    photos[5].image_codec = "webp"
+
+    sender = TelegramSender(bot, 1, None, 30)
+    await sender.send_album(photos)
+    await sender.send_summary("📦 12 фото", item.token, "https://www.tiktok.com/@u/photo/1")
+    kinds = [type(r).__name__ for r in session.requests]
+    # 11 фото: альбом из 10 + одиночное фото, затем WebP документом, затем сводка с кнопками
+    assert kinds == ["SendMediaGroup", "SendPhoto", "SendDocument", "SendMessage"]
+    assert len(session.requests[0].media) == 10
+    summary = session.requests[3]
+    assert summary.reply_markup.inline_keyboard[0][0].text == "📁 Скачать оригиналы файлами"
+
+    session.requests.clear()
+    assert await send_original(bot, store, item.token, 1, 30) == "ok"
+    assert [type(r).__name__ for r in session.requests] == ["SendMediaGroup", "SendMediaGroup"]
+    assert [len(r.media) for r in session.requests] == [10, 2]
+    assert all(m.type == "document" and m.disable_content_type_detection for r in session.requests
+               for m in r.media)
+    assert all(p.path is None and p.document_file_id for p in item.parts)

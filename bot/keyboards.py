@@ -12,10 +12,11 @@ DOC_PREFIX = "doc:"
 HELP_DATA = "help"
 
 
-def video_keyboard(token: str | None, source_url: str) -> InlineKeyboardMarkup:
+def video_keyboard(token: str | None, source_url: str, *, many: bool = False) -> InlineKeyboardMarkup:
     rows = []
     if token:
-        rows.append([InlineKeyboardButton(text=texts.BTN_DOCUMENT, callback_data=DOC_PREFIX + token,
+        label = texts.BTN_DOCUMENTS if many else texts.BTN_DOCUMENT
+        rows.append([InlineKeyboardButton(text=label, callback_data=DOC_PREFIX + token,
                                           style=ButtonStyle.SUCCESS)])
     rows.append([InlineKeyboardButton(text=texts.BTN_SOURCE, url=source_url,
                                       style=ButtonStyle.PRIMARY)])

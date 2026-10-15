@@ -28,3 +28,13 @@ def sample_m4a(tmp_path_factory) -> Path:
     subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "sine=duration=1",
                     "-c:a", "aac", str(path)], check=True)
     return path
+
+
+@pytest.fixture(scope="session")
+def sample_jpg(tmp_path_factory) -> Path:
+    if not shutil.which("ffmpeg"):
+        pytest.skip("ffmpeg не установлен")
+    path = tmp_path_factory.mktemp("media") / "photo.jpg"
+    subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "testsrc=size=1080x1350",
+                    "-frames:v", "1", str(path)], check=True)
+    return path

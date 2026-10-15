@@ -1,8 +1,8 @@
 """Поиск ссылки в сообщении, проверка домена и определение типа контента.
 
 Важно: путь TikTok вида /@user/video/<id> НЕ означает, что это обычное видео —
-по такому же адресу открываются и сторис. Поэтому тип TIKTOK_POST означает
-«публикация TikTok (видео или сторис)», а не «обычное видео».
+по такому же адресу открываются и сторис, и фото-посты. Поэтому тип TIKTOK_POST
+означает «публикация TikTok», а что в ней — выясняет загрузчик.
 """
 
 from __future__ import annotations
@@ -24,8 +24,7 @@ class Platform(str, Enum):
 
 class LinkKind(str, Enum):
     TIKTOK_SHORT = "tiktok_short"  # vm./vt.tiktok.com, tiktok.com/t/… — нужен редирект
-    TIKTOK_POST = "tiktok_post"  # видео ИЛИ сторис — заранее не известно
-    TIKTOK_PHOTO = "tiktok_photo"  # фото-пост, видео нет
+    TIKTOK_POST = "tiktok_post"  # видео, фото-пост или сторис — заранее не известно
     INSTAGRAM_SHARE = "instagram_share"  # instagram.com/share/… — нужен редирект
     INSTAGRAM_POST = "instagram_post"  # /p/, /tv/
     INSTAGRAM_REEL = "instagram_reel"  # /reel/, /reels/
@@ -41,7 +40,6 @@ class LinkErrorCode(str, Enum):
     BAD_PORT = "bad_port"
     UNSUPPORTED_CONTENT = "unsupported_content"
     INSTAGRAM_STORY = "instagram_story"
-    TIKTOK_PHOTO = "tiktok_photo"
     TOO_LONG = "too_long"
 
 
@@ -153,10 +151,9 @@ def _parse_tiktok(host: str, path: str, query: str, original: str) -> ParsedLink
         return ParsedLink(Platform.TIKTOK, LinkKind.TIKTOK_SHORT, url, original, m.group("id"))
 
     if m := _TT_VIDEO.match(path):
-        if m.group("kind") == "photo":
-            raise LinkError(LinkErrorCode.TIKTOK_PHOTO)
         user, vid = m.group("user"), m.group("id")
-        # yt-dlp понимает только хост www.tiktok.com; параметры запроса ему не нужны.
+        # yt-dlp понимает только www.tiktok.com/@user/video/<id>; фото-пост TikTok открывается
+        # по тому же адресу с /video/. Параметры запроса загрузчику не нужны.
         url = f"https://www.tiktok.com/@{user}/video/{vid}"
         return ParsedLink(Platform.TIKTOK, LinkKind.TIKTOK_POST, url, original, vid)
 

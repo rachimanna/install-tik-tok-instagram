@@ -24,7 +24,7 @@ from .file_store import FileStore
 from .limits import UserLimiter
 from .links import LinkError, ParsedLink, extract_url, parse_link
 from .net_guard import Fetcher, HostChecker, ResolveError, UnsafeAddressError, ensure_public_host, resolve_link
-from .providers import DownloadedVideo, DownloadResult, ErrorCode, Provider, ProviderError, pick_provider
+from .providers import DownloadedMedia, DownloadResult, ErrorCode, Provider, ProviderError, pick_provider
 from .redact import redact_url
 
 log = logging.getLogger(__name__)
@@ -40,8 +40,15 @@ class Status(Protocol):
 
 
 class Sender(Protocol):
-    async def send_video(self, video: DownloadedVideo, caption: str, token: str | None,
-                         source_url: str) -> None: ...
+    async def send_single(self, item: DownloadedMedia, caption: str, token: str | None,
+                          source_url: str) -> None:
+        """Одно видео или фото с кнопками."""
+
+    async def send_album(self, items: list[DownloadedMedia]) -> None:
+        """Несколько элементов альбомами по порядку (кнопки к альбому прикрепить нельзя)."""
+
+    async def send_summary(self, text: str, token: str | None, source_url: str) -> None:
+        """Сообщение с описанием альбома и кнопками."""
 
 
 class SendTooLarge(Exception):
@@ -168,34 +175,36 @@ class Pipeline:
             raise
 
     async def _send_all(self, result: DownloadResult, sender: Sender, source: str) -> str | None:
-        limit = self.settings.max_upload_bytes
-        total = len(result.videos)
-        sent = 0
-        too_large = list(result.skipped_too_large)
-        for index, video in enumerate(result.videos, start=1):
-            caption = texts.video_caption(result.platform, video, index, total)
-            stored = self.store.put(video.path, _filename(result, video, index))
-            video.path = stored.path  # файл теперь живёт в кэше
-            try:
-                await sender.send_video(video, caption, stored.token, source)
-                sent += 1
-            except SendTooLarge:
-                self.store.discard(stored.token)
-                too_large.append(video.size)
-            except BaseException:
-                self.store.discard(stored.token)
-                raise
-        if sent == 0:
-            if too_large:
-                raise SendTooLarge()
+        """Отправляет всё скачанное. Возвращает текст для статуса (заметки) или None."""
+        items = result.items
+        if not items:
             raise SendFailed()
-        return texts.summary_notes(result.skipped_non_video, too_large, result.truncated,
-                                   limit, self.settings.max_items_per_post)
+        notes = texts.summary_notes(result.skipped_unsupported, result.skipped_too_large,
+                                    result.truncated, self.settings.max_upload_bytes,
+                                    self.settings.max_items_per_post)
+        stored = self.store.put([(item.path, _filename(result, item, i))
+                                 for i, item in enumerate(items, start=1)])
+        for item, part in zip(items, stored.parts):
+            item.path = part.path  # файлы теперь живут в кэше
+        try:
+            if len(items) == 1:
+                caption = texts.single_caption(result.platform, items[0])
+                await sender.send_single(items[0], caption, stored.token, source)
+                return notes
+            await sender.send_album(items)
+            summary = texts.album_caption(result.platform, items)
+            if notes:
+                summary += "\n\n" + notes
+            await sender.send_summary(summary, stored.token, source)
+            return None
+        except BaseException:
+            self.store.discard(stored.token)
+            raise
 
 
-def _filename(result: DownloadResult, video: DownloadedVideo, index: int) -> str:
-    suffix = video.path.suffix or ".mp4"
-    base = f"{result.platform.value}_{video.path.stem.split('.')[0]}"
-    if len(result.videos) > 1:
+def _filename(result: DownloadResult, item: DownloadedMedia, index: int) -> str:
+    suffix = item.path.suffix or ".mp4"
+    base = f"{result.platform.value}_{item.path.stem.split('.')[0]}"
+    if len(result.items) > 1:
         base += f"_{index}"
     return base[:80] + suffix

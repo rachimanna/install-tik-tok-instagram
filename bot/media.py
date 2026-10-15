@@ -19,6 +19,7 @@ class ProbeInfo:
     width: int | None = None
     height: int | None = None
     duration: float | None = None
+    codec: str | None = None
 
 
 def probe(path: Path, timeout: int = 30) -> ProbeInfo | None:
@@ -51,7 +52,8 @@ def probe(path: Path, timeout: int = 30) -> ProbeInfo | None:
         except (KeyError, TypeError, ValueError):
             continue
     return ProbeInfo(has_video=video is not None, has_audio=audio is not None,
-                     width=width, height=height, duration=duration)
+                     width=width, height=height, duration=duration,
+                     codec=(video or {}).get("codec_name"))
 
 
 def _rotation(stream: dict) -> int:

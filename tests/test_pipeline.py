@@ -15,7 +15,8 @@ from bot.limits import UserLimiter
 from bot.links import Platform
 from bot.net_guard import HopResponse
 from bot.pipeline import Pipeline, SendTooLarge
-from bot.providers.base import DownloadedVideo, DownloadResult, ErrorCode, ProviderError, Watermark
+from bot.providers.base import (DownloadedMedia, DownloadResult, ErrorCode, MediaKind, ProviderError,
+                               Watermark)
 
 MB = 1024 * 1024
 TT_URL = "https://www.tiktok.com/@u/video/7500000000000000000"
@@ -35,13 +36,24 @@ class FakeStatus:
 class FakeSender:
     def __init__(self, fail=None):
         self.sent = []
+        self.albums = []
+        self.summaries = []
         self.fail = fail
 
-    async def send_video(self, video, caption, token, source_url):
-        assert video.path.is_file()
+    async def send_single(self, item, caption, token, source_url):
+        assert item.path.is_file()
         if self.fail:
             raise self.fail
-        self.sent.append((video.path, caption, token, source_url))
+        self.sent.append((item.path, caption, token, source_url))
+
+    async def send_album(self, items):
+        assert all(i.path.is_file() for i in items)
+        if self.fail:
+            raise self.fail
+        self.albums.append([i.kind for i in items])
+
+    async def send_summary(self, text, token, source_url):
+        self.summaries.append((text, token, source_url))
 
 
 class FakeProvider:
@@ -62,15 +74,15 @@ class FakeProvider:
         return self.behaviour(self, link, workdir, cancel)
 
 
-def ok_behaviour(n=1, watermark=Watermark.CLEAN):
+def ok_behaviour(n=1, watermark=Watermark.CLEAN, kinds=None):
     def run(self, link, workdir, cancel):
-        videos = []
-        for i in range(n):
-            p = workdir / f"v{i}.mp4"
+        items = []
+        for i, kind in enumerate(kinds or [MediaKind.VIDEO] * n):
+            p = workdir / (f"v{i}.mp4" if kind is MediaKind.VIDEO else f"p{i}.jpg")
             shutil.copyfile(self.sample, p)
             (workdir / f"v{i}.thumb.jpg").write_bytes(b"x")
-            videos.append(DownloadedVideo(p, p.stat().st_size, 360, 640, 2.0, watermark=watermark))
-        return DownloadResult(platform=link.platform, videos=videos)
+            items.append(DownloadedMedia(p, p.stat().st_size, kind, 360, 640, 2.0, watermark=watermark))
+        return DownloadResult(platform=link.platform, items=items)
     return run
 
 
@@ -121,7 +133,7 @@ async def test_success_flow_single_status_and_cleanup(tmp_path, sample_mp4):
     assert jobs_empty(p)
     assert not provider.workdirs[0].exists()
     stored = p.store.get(token)
-    assert stored is not None and stored.path.is_file()
+    assert stored is not None and stored.parts[0].path.is_file()
     assert p.limiter.active(1) == 0
 
 
@@ -188,17 +200,34 @@ async def test_send_too_large_does_not_loop(tmp_path, sample_mp4):
     assert len(p.store) == 0 and jobs_empty(p)
 
 
-async def test_carousel_partial_notes(tmp_path, sample_mp4):
+async def test_carousel_sent_as_album_with_summary_buttons(tmp_path, sample_mp4):
+    kinds = [MediaKind.VIDEO, MediaKind.PHOTO, MediaKind.PHOTO]
+
     def run_(self, link, workdir, cancel):
-        res = ok_behaviour(2)(self, link, workdir, cancel)
-        res.skipped_non_video = 1
+        res = ok_behaviour(kinds=kinds)(self, link, workdir, cancel)
+        res.skipped_unsupported = 1
         return res
 
     sender = FakeSender()
     p = make_pipeline(tmp_path, FakeProvider(run_, sample_mp4))
     _, log = await run(p, "https://www.instagram.com/p/Cabc/", sender)
-    assert [s[1].split("\n")[0].split(" · ")[1] for s in sender.sent] == ["1/2", "2/2"]
-    assert "Пропущено фото: 1" in log[-1][1]
+    assert sender.albums == [kinds] and sender.sent == []
+    text, token, source = sender.summaries[0]
+    assert "1 видео, 2 фото" in text and "Не удалось скачать элементов: 1" in text
+    assert source == "https://www.instagram.com/p/Cabc/"
+    assert len(p.store.get(token).parts) == 3
+    assert log[-1] == ("finish", None, None)
+    assert jobs_empty(p)
+
+
+async def test_single_photo_sent_with_buttons(tmp_path, sample_mp4):
+    sender = FakeSender()
+    p = make_pipeline(tmp_path, FakeProvider(ok_behaviour(kinds=[MediaKind.PHOTO],
+                                                          watermark=Watermark.NOT_APPLICABLE), sample_mp4))
+    await run(p, "https://www.tiktok.com/@u/photo/7500000000000000000", sender)
+    path, caption, token, _ = sender.sent[0]
+    assert caption.startswith("🖼 <b>TikTok</b>") and "водяного" not in caption
+    assert path.suffix == ".jpg" and token
 
 
 async def test_per_user_limit(tmp_path, sample_mp4):

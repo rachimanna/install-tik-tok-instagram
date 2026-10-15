@@ -27,6 +27,8 @@ def test_extract_url(text, expected):
      "https://www.tiktok.com/@/video/7123456789012345678"),
     ("https://www.tiktok.com/embed/v2/7123456789012345678", LinkKind.TIKTOK_POST,
      "https://www.tiktok.com/@/video/7123456789012345678"),
+    ("https://www.tiktok.com/@u/photo/7123456789012345678?lang=ru", LinkKind.TIKTOK_POST,
+     "https://www.tiktok.com/@u/video/7123456789012345678"),
     ("https://www.instagram.com/reel/C1a2B3c4D5e/?igsh=abc", LinkKind.INSTAGRAM_REEL,
      "https://www.instagram.com/reel/C1a2B3c4D5e/"),
     ("https://instagram.com/reels/C1a2B3c4D5e", LinkKind.INSTAGRAM_REEL, "https://www.instagram.com/reel/C1a2B3c4D5e/"),
@@ -69,7 +71,6 @@ def test_tiktok_video_path_is_not_assumed_to_be_regular_video():
     ("https://www.instagram.com/stories/user/123/", LinkErrorCode.INSTAGRAM_STORY),
     ("https://www.instagram.com/someuser/", LinkErrorCode.UNSUPPORTED_CONTENT),
     ("https://www.tiktok.com/@someuser", LinkErrorCode.UNSUPPORTED_CONTENT),
-    ("https://www.tiktok.com/@u/photo/7123456789012345678", LinkErrorCode.TIKTOK_PHOTO),
     ("https://www.tiktok.com/" + "a" * 3000, LinkErrorCode.TOO_LONG),
 ])
 def test_parse_rejected(url, code):

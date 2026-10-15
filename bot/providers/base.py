@@ -11,11 +11,16 @@ from typing import Protocol
 from ..links import ParsedLink, Platform
 
 
+class MediaKind(str, Enum):
+    VIDEO = "video"
+    PHOTO = "photo"
+
+
 class Watermark(str, Enum):
     CLEAN = "clean"  # загрузчик выбрал поток, который не помечен как водяной знак
     WATERMARKED = "watermarked"  # явно помечен как версия с водяным знаком
     UNKNOWN = "unknown"  # отсутствие водяного знака подтвердить нельзя
-    NOT_APPLICABLE = "n/a"  # Instagram: водяного знака у источника нет
+    NOT_APPLICABLE = "n/a"  # Instagram и фото: об водяном знаке ничего не утверждаем
 
 
 class ErrorCode(str, Enum):
@@ -23,7 +28,7 @@ class ErrorCode(str, Enum):
     LOGIN_REQUIRED = "login_required"
     NOT_FOUND = "not_found"
     BLOCKED = "blocked"
-    NO_VIDEO = "no_video"
+    NO_MEDIA = "no_media"
     NO_CLEAN_VERSION = "no_clean_version"
     TOO_LARGE = "too_large"
     TIMEOUT = "timeout"
@@ -40,22 +45,24 @@ class ProviderError(Exception):
 
 
 @dataclass
-class DownloadedVideo:
+class DownloadedMedia:
     path: Path
     size: int
+    kind: MediaKind = MediaKind.VIDEO
     width: int | None = None
     height: int | None = None
     duration: float | None = None
     thumbnail: Path | None = None
     watermark: Watermark = Watermark.NOT_APPLICABLE
     title: str | None = None
+    image_codec: str | None = None  # для фото: mjpeg / png / webp …
 
 
 @dataclass
 class DownloadResult:
     platform: Platform
-    videos: list[DownloadedVideo] = field(default_factory=list)
-    skipped_non_video: int = 0  # фото в карусели и т. п.
+    items: list[DownloadedMedia] = field(default_factory=list)  # в порядке публикации
+    skipped_unsupported: int = 0  # элементы без видео и фото (например, только звук)
     skipped_too_large: list[int | None] = field(default_factory=list)  # размеры, если известны
     truncated: bool = False  # в публикации больше элементов, чем MAX_ITEMS_PER_POST
 

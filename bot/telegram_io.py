@@ -11,18 +11,41 @@ from typing import TypeVar
 from aiogram import Bot
 from aiogram.exceptions import (TelegramBadRequest, TelegramEntityTooLarge, TelegramNetworkError,
                                 TelegramRetryAfter)
-from aiogram.types import FSInputFile, Message, ReplyParameters
+from aiogram.types import (FSInputFile, InputMediaDocument, InputMediaPhoto, InputMediaVideo, Message,
+                           ReplyParameters)
 
 from . import keyboards
 from .file_store import FileStore
 from .pipeline import SendFailed, SendTooLarge
-from .providers import DownloadedVideo
+from .providers import DownloadedMedia, MediaKind
 
 log = logging.getLogger(__name__)
 
 T = TypeVar("T")
 SEND_ATTEMPTS = 3
 MAX_RETRY_AFTER = 60
+ALBUM_SIZE = 10  # Telegram: в одной медиагруппе 2–10 элементов
+# Ограничения sendPhoto: до 10 МБ, сумма сторон до 10000, соотношение сторон до 20.
+PHOTO_MAX_BYTES = 10 * 1024 * 1024
+PHOTO_CODECS = {"mjpeg", "jpg", "jpeg", "png"}
+
+
+def photo_sendable(item: DownloadedMedia) -> bool:
+    """Можно ли отправить фото как фото (иначе — документом, без перекодирования)."""
+    if item.kind is not MediaKind.PHOTO or item.size > PHOTO_MAX_BYTES:
+        return False
+    if (item.image_codec or "").lower() not in PHOTO_CODECS:
+        return False
+    if item.width and item.height:
+        if item.width + item.height > 10000:
+            return False
+        if max(item.width, item.height) / max(1, min(item.width, item.height)) > 20:
+            return False
+    return True
+
+
+def _chunks(items: list, size: int) -> list[list]:
+    return [items[i:i + size] for i in range(0, len(items), size)]
 
 
 async def with_retries(call: Callable[[], Awaitable[T]], attempts: int = SEND_ATTEMPTS) -> T:
@@ -83,51 +106,108 @@ class TelegramSender:
         self.reply_to = reply_to
         self.timeout = timeout
 
-    async def send_video(self, video: DownloadedVideo, caption: str, token: str | None,
-                         source_url: str) -> None:
-        markup = keyboards.video_keyboard(token, source_url)
+    def _reply(self) -> ReplyParameters | None:
+        if not self.reply_to:
+            return None
+        return ReplyParameters(message_id=self.reply_to, allow_sending_without_reply=True)
+
+    async def send_single(self, item: DownloadedMedia, caption: str, token: str | None,
+                          source_url: str) -> None:
+        await self._send_one(item, caption, keyboards.video_keyboard(token, source_url))
+
+    async def send_album(self, items: list[DownloadedMedia]) -> None:
+        in_album = [i for i in items if i.kind is MediaKind.VIDEO or photo_sendable(i)]
+        as_documents = [i for i in items if i not in in_album]
+        for chunk in _chunks(in_album, ALBUM_SIZE):
+            if len(chunk) == 1:
+                await self._send_one(chunk[0], None, None)
+                continue
+
+            async def call(chunk=chunk) -> list[Message]:
+                return await self.bot.send_media_group(
+                    chat_id=self.chat_id, media=[_input_media(i) for i in chunk],
+                    reply_parameters=self._reply(), request_timeout=self.timeout)
+
+            await with_retries(call)
+        for item in as_documents:
+            await self._send_one(item, None, None)
+
+    async def send_summary(self, text: str, token: str | None, source_url: str) -> None:
+        markup = keyboards.video_keyboard(token, source_url, many=True)
 
         async def call() -> Message:
-            return await self.bot.send_video(
-                chat_id=self.chat_id,
-                video=FSInputFile(video.path, filename=video.path.name),
-                caption=caption,
-                width=video.width,
-                height=video.height,
-                duration=int(round(video.duration)) if video.duration else None,
-                thumbnail=FSInputFile(video.thumbnail) if video.thumbnail else None,
-                supports_streaming=True,
-                reply_markup=markup,
-                reply_parameters=(ReplyParameters(message_id=self.reply_to,
-                                                  allow_sending_without_reply=True)
-                                  if self.reply_to else None),
-                request_timeout=self.timeout,
-            )
+            return await self.bot.send_message(chat_id=self.chat_id, text=text, reply_markup=markup,
+                                               disable_web_page_preview=True)
+
+        await with_retries(call)
+
+    async def _send_one(self, item: DownloadedMedia, caption: str | None, markup) -> None:
+        common = dict(chat_id=self.chat_id, caption=caption, reply_markup=markup,
+                      reply_parameters=self._reply(), request_timeout=self.timeout)
+
+        async def call() -> Message:
+            if item.kind is MediaKind.VIDEO:
+                return await self.bot.send_video(
+                    video=FSInputFile(item.path, filename=item.path.name),
+                    width=item.width, height=item.height,
+                    duration=int(round(item.duration)) if item.duration else None,
+                    thumbnail=FSInputFile(item.thumbnail) if item.thumbnail else None,
+                    supports_streaming=True, **common)
+            if photo_sendable(item):
+                return await self.bot.send_photo(photo=FSInputFile(item.path, filename=item.path.name),
+                                                 **common)
+            # Фото, которое Telegram не примет как фото (слишком большое, WebP/HEIC…), —
+            # отправляем файлом как есть.
+            return await self.bot.send_document(
+                document=FSInputFile(item.path, filename=item.path.name),
+                disable_content_type_detection=True, **common)
 
         await with_retries(call)
 
 
+def _input_media(item: DownloadedMedia) -> InputMediaPhoto | InputMediaVideo:
+    file = FSInputFile(item.path, filename=item.path.name)
+    if item.kind is MediaKind.VIDEO:
+        return InputMediaVideo(
+            media=file, width=item.width, height=item.height,
+            duration=int(round(item.duration)) if item.duration else None,
+            thumbnail=FSInputFile(item.thumbnail) if item.thumbnail else None,
+            supports_streaming=True)
+    return InputMediaPhoto(media=file)
+
+
 async def send_original(bot: Bot, store: FileStore, token: str, chat_id: int, timeout: int) -> str:
-    """Отправить файл документом. Возвращает 'ok' | 'expired' | 'too_large' | 'failed'."""
+    """Отправить файлы документами как есть. Возвращает 'ok' | 'expired' | 'too_large' | 'failed'."""
     item = store.get(token)
-    if item is None or (item.document_file_id is None and item.path is None):
+    if item is None or not item.available:
         return "expired"
 
-    async def call() -> Message:
-        document = item.document_file_id or FSInputFile(item.path, filename=item.filename)
-        return await bot.send_document(
-            chat_id=chat_id,
-            document=document,
-            disable_content_type_detection=True,  # без обработки: файл как есть
-            request_timeout=timeout,
-        )
+    def document(part):
+        return part.document_file_id or FSInputFile(part.path, filename=part.filename)
 
+    file_ids: list[str | None] = []
     try:
-        message = await with_retries(call)
+        for chunk in _chunks(item.parts, ALBUM_SIZE):
+            if len(chunk) == 1:
+                async def call_one(part=chunk[0]) -> Message:
+                    return await bot.send_document(chat_id=chat_id, document=document(part),
+                                                   disable_content_type_detection=True,
+                                                   request_timeout=timeout)
+                messages = [await with_retries(call_one)]
+            else:
+                async def call_group(chunk=chunk) -> list[Message]:
+                    return await bot.send_media_group(
+                        chat_id=chat_id,
+                        media=[InputMediaDocument(media=document(p), disable_content_type_detection=True)
+                               for p in chunk],
+                        request_timeout=timeout)
+                messages = await with_retries(call_group)
+            file_ids.extend(m.document.file_id if m.document else None for m in messages)
     except SendTooLarge:
         return "too_large"
     except SendFailed:
         return "failed"
-    if message.document and not item.document_file_id:
-        store.remember_document(token, message.document.file_id)
+    finally:
+        if file_ids:
+            store.remember_documents(token, file_ids)
     return "ok"
