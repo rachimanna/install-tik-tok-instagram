@@ -6,3 +6,4 @@ __pycache__/
 venv/
 .pytest_cache/
 cookies*.txt
+INSTAGRAM_COOKIES.txt

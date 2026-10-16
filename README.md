@@ -116,6 +116,24 @@ Instagram требует код, бот отвечает, что админис�
 Если нужна сессия из браузера, а не вход по паролю, есть способы через cookies (ниже). На iPhone
 Safari скрывает от расширений cookie `sessionid`, поэтому с iPhone они обычно не работают.
 
+Как получить `sessionid` **только с iPhone** — облачный компьютер GitHub Codespaces:
+1. Откройте в Safari ссылку (нужен вход в GitHub):
+   `https://codespaces.new/rachimanna/install-tik-tok-instagram?devcontainer_path=.devcontainer/instagram-login/devcontainer.json`
+   Если конфигурация не выбралась сама: на странице создания нажмите **Dev container
+   configuration** и выберите «Вход в Instagram (Firefox в браузере)». Создание занимает
+   несколько минут.
+2. В открывшемся VS Code откройте терминал и выполните `bash tools/open-instagram.sh`.
+3. Вкладка **Ports** → порт **6080** («Рабочий стол») → значок глобуса. Откроется рабочий стол,
+   пароль `vscode`. Там уже открыт Firefox на странице входа Instagram.
+4. Войдите в **отдельный** аккаунт. Если Instagram пришлёт код на почту, введите его прямо
+   в Firefox. Клавиатура в noVNC открывается кнопкой в боковой панели слева.
+5. Вернитесь в VS Code и выполните в терминале `python3 tools/instagram_session.py`. Появится
+   файл `INSTAGRAM_COOKIES.txt`: откройте его, скопируйте строку и вставьте в Render →
+   **Environment** → `INSTAGRAM_COOKIES`.
+6. Удалите codespace: github.com → **Codespaces** → … → **Delete**. В нём осталась сессия
+   аккаунта. Бесплатного лимита Codespaces (120 core-часов в месяц на личном аккаунте) на это
+   хватает с запасом.
+
 Как подключить cookies **с iPhone** (если расширение видит `sessionid`):
 1. Установите из App Store бесплатное расширение Safari **Cookie-Editor** и включите его:
    **Настройки → Safari → Расширения → Cookie-Editor**, разрешите доступ к instagram.com.
