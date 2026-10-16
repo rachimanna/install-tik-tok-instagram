@@ -31,7 +31,7 @@ import shutil
 import socket
 import threading
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 from urllib.parse import urlsplit
 
 import yt_dlp
@@ -182,7 +182,7 @@ class YtDlpProvider:
         max_bytes: int,
         max_items: int = 20,
         allow_watermark_fallback: bool = True,
-        cookies_file: Path | None = None,
+        cookies_file: Path | Callable[[], Path | None] | None = None,
         proxy: str | None = None,
         socket_timeout: int = 20,
         ydl_class: type = yt_dlp.YoutubeDL,
@@ -234,10 +234,11 @@ class YtDlpProvider:
             "writesubtitles": False,
             "check_formats": False,
         }
-        if self.cookies_file:
+        cookies = self.cookies_file() if callable(self.cookies_file) else self.cookies_file
+        if cookies:
             # yt-dlp перезаписывает cookie-файл при выходе — работаем с копией в папке задачи.
             copy = workdir / "cookies.txt"
-            shutil.copyfile(self.cookies_file, copy)
+            shutil.copyfile(cookies, copy)
             opts["cookiefile"] = str(copy)
         if self.proxy:
             opts["proxy"] = self.proxy

@@ -12,7 +12,9 @@ __all__ = ["AudioTrack", "DownloadedMedia", "DownloadResult", "ErrorCode", "Medi
            "ProviderError", "Watermark", "YtDlpProvider", "build_providers", "pick_provider"]
 
 
-def build_providers(settings: Settings) -> list[Provider]:
+def build_providers(settings: Settings, cookie_source=None) -> list[Provider]:
+    """cookie_source — функция, возвращающая путь к cookies.txt (например, после входа
+    в служебный аккаунт Instagram), или None — тогда берутся cookies из настроек."""
     # Чтобы сменить или добавить провайдера, создайте класс с интерфейсом Provider
     # (см. base.py) и поставьте его в этот список.
     return [
@@ -20,7 +22,7 @@ def build_providers(settings: Settings) -> list[Provider]:
             max_bytes=settings.max_upload_bytes,
             max_items=settings.max_items_per_post,
             allow_watermark_fallback=settings.tiktok_allow_watermark_fallback,
-            cookies_file=settings.ytdlp_cookies_file,
+            cookies_file=cookie_source or settings.ytdlp_cookies_file,
             proxy=settings.ytdlp_proxy,
         ),
     ]

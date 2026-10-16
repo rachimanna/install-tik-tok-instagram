@@ -62,6 +62,8 @@ class Settings:
     ytdlp_proxy: str | None = None
     log_level: str = "INFO"
     send_audio: bool = True
+    instagram_username: str | None = None
+    instagram_password: str | None = None
     mode: str = "polling"  # polling | webhook
     webhook_base_url: str | None = None
     webhook_secret: str | None = None
@@ -76,6 +78,17 @@ class Settings:
         """Telegram принимает в secret_token только A-Z, a-z, 0-9, _ и - (до 256 символов)."""
         seed = self.webhook_secret or self.bot_token
         return hashlib.sha256(("webhook:" + seed).encode()).hexdigest()
+
+    @property
+    def instagram_login_enabled(self) -> bool:
+        return bool(self.instagram_username and self.instagram_password)
+
+    @property
+    def instagram_stories_enabled(self) -> bool:
+        return bool(self.ytdlp_cookies_file) or self.instagram_login_enabled
+
+    def __repr__(self) -> str:  # не показываем секреты при случайной печати настроек
+        return f"Settings(mode={self.mode!r}, work_dir={str(self.work_dir)!r}, ...)"
 
     @property
     def jobs_dir(self) -> Path:
@@ -131,6 +144,8 @@ class Settings:
             ytdlp_proxy=_opt("YTDLP_PROXY"),
             log_level=os.getenv("LOG_LEVEL", "INFO").strip().upper() or "INFO",
             send_audio=_bool("SEND_AUDIO", True),
+            instagram_username=_opt("INSTAGRAM_USERNAME"),
+            instagram_password=os.getenv("INSTAGRAM_PASSWORD") or None,
         )
 
 

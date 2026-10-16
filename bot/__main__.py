@@ -26,6 +26,7 @@ from dotenv import load_dotenv
 from .config import ConfigError, Settings
 from .file_store import FileStore
 from .handlers import build_router, sweep_forever
+from .instagram_auth import InstagramAuth
 from .limits import UserLimiter
 from .net_guard import aiohttp_fetcher, make_http_session
 from .pipeline import Pipeline
@@ -90,8 +91,14 @@ async def main() -> None:
 
     store = FileStore(settings.cache_dir, settings.file_ttl_seconds, settings.cache_max_bytes)
     http = make_http_session()
-    pipeline = Pipeline(settings=settings, providers=build_providers(settings), store=store,
-                        limiter=UserLimiter(settings.max_tasks_per_user), fetch=aiohttp_fetcher(http))
+    auth = None
+    cookie_source = None
+    if settings.instagram_login_enabled and not settings.ytdlp_cookies_file:
+        auth = InstagramAuth(settings.instagram_username, settings.instagram_password, settings.work_dir)
+        cookie_source = lambda: auth.current_path  # noqa: E731
+    pipeline = Pipeline(settings=settings, providers=build_providers(settings, cookie_source), store=store,
+                        limiter=UserLimiter(settings.max_tasks_per_user), fetch=aiohttp_fetcher(http),
+                        instagram_auth=auth)
     pipeline.prepare_dirs()
 
     dp = Dispatcher()

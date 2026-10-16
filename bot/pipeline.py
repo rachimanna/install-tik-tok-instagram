@@ -21,6 +21,7 @@ from typing import Protocol
 from . import media, texts
 from .config import Settings
 from .file_store import FileStore
+from .instagram_auth import InstagramAuth, InstagramLoginError
 from .limits import UserLimiter
 from .links import LinkError, LinkKind, ParsedLink, extract_url, parse_link
 from .net_guard import Fetcher, HostChecker, ResolveError, UnsafeAddressError, ensure_public_host, resolve_link
@@ -71,6 +72,7 @@ class Pipeline:
     limiter: UserLimiter
     fetch: Fetcher
     check_host: HostChecker = ensure_public_host
+    instagram_auth: InstagramAuth | None = None
 
     def __post_init__(self) -> None:
         self.semaphore = asyncio.Semaphore(self.settings.max_concurrent_downloads)
@@ -106,7 +108,7 @@ class Pipeline:
             log.info("Rejected link: %s", exc.code.value)
             return texts.LINK_ERRORS[exc.code]
 
-        if link.kind is LinkKind.INSTAGRAM_STORY and not self.settings.ytdlp_cookies_file:
+        if link.kind is LinkKind.INSTAGRAM_STORY and not self.settings.instagram_stories_enabled:
             return texts.INSTAGRAM_STORIES_DISABLED
         if not self.limiter.try_acquire(user_id):
             return texts.BUSY
@@ -123,17 +125,32 @@ class Pipeline:
             link = await resolve_link(link, self.fetch, self.check_host)
             provider = pick_provider(self.providers, link)
             log.info("Download %s via %s", redact_url(link.url), provider.name)
+            login_based = (link.kind is LinkKind.INSTAGRAM_STORY and self.instagram_auth is not None
+                           and not self.settings.ytdlp_cookies_file)
+            if login_based:
+                await self.instagram_auth.ensure()
             async with self.job_dir() as workdir:
                 if self.semaphore.locked():
                     await status.update(texts.QUEUED)
                 async with self.semaphore:
                     await status.update(texts.DOWNLOADING)
-                    result = await self._download_with_retry(provider, link, workdir)
+                    try:
+                        result = await self._download_with_retry(provider, link, workdir)
+                    except ProviderError as exc:
+                        if not login_based or exc.code is not ErrorCode.LOGIN_REQUIRED:
+                            raise
+                        # Сессия служебного аккаунта устарела — входим заново (не чаще раза в 10 мин).
+                        log.info("Instagram session looks expired")
+                        if not await self.instagram_auth.relogin():
+                            raise
+                        result = await self._download_with_retry(provider, link, workdir)
                 await status.update(texts.SENDING)
                 note = await self._send_all(result, sender, source)
             await status.finish(note, source if note else None)
         except LinkError as exc:
             await status.finish(texts.LINK_ERRORS[exc.code])
+        except InstagramLoginError:
+            await status.finish(texts.INSTAGRAM_LOGIN_FAILED, source)
         except UnsafeAddressError:
             log.warning("Blocked non-public address for %s", redact_url(link.url))
             await status.finish(texts.UNSAFE_ADDRESS)
