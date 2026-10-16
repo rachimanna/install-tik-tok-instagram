@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 
 from aiogram import Bot, F, Router
 from aiogram.filters import Command, CommandStart
@@ -12,6 +13,7 @@ from aiogram.types import CallbackQuery, Message
 from . import keyboards, texts
 from .config import Settings
 from .file_store import FileStore
+from .instagram_auth import CODE_WAIT_SECONDS, InstagramLoginError
 from .pipeline import Pipeline
 from .telegram_io import TelegramSender, TelegramStatus, send_original
 
@@ -23,6 +25,9 @@ def build_router(pipeline: Pipeline, store: FileStore, settings: Settings) -> Ro
     help_text = texts.help_text(settings.max_upload_bytes, settings.file_ttl_seconds)
     # Повторное нажатие на ту же кнопку во время отправки не запускает вторую отправку.
     in_flight: set[str] = set()
+    # /iglogin: чат, в котором бот ждёт код подтверждения Instagram → future с кодом.
+    pending_codes: dict[int, asyncio.Future] = {}
+    login_running = asyncio.Lock()
 
     @router.message(CommandStart())
     async def start(message: Message) -> None:
@@ -31,6 +36,44 @@ def build_router(pipeline: Pipeline, store: FileStore, settings: Settings) -> Ro
     @router.message(Command("help"))
     async def help_cmd(message: Message) -> None:
         await message.answer(help_text)
+
+    @router.message(Command("iglogin"))
+    async def iglogin(message: Message, bot: Bot) -> None:
+        user_id = message.from_user.id if message.from_user else None
+        if settings.admin_ids and user_id not in settings.admin_ids:
+            await message.answer(texts.IGLOGIN_FORBIDDEN)
+            return
+        if settings.ytdlp_cookies_file:
+            await message.answer(texts.IGLOGIN_USES_COOKIES)
+            return
+        auth = pipeline.instagram_auth
+        if auth is None:
+            await message.answer(texts.IGLOGIN_DISABLED)
+            return
+        if login_running.locked():
+            await message.answer(texts.IGLOGIN_BUSY)
+            return
+        chat_id = message.chat.id
+
+        async def ask_code(channel: str) -> str | None:
+            future = asyncio.get_running_loop().create_future()
+            pending_codes[chat_id] = future
+            await bot.send_message(chat_id, texts.iglogin_ask_code(channel))
+            try:
+                return await asyncio.wait_for(future, CODE_WAIT_SECONDS)
+            except TimeoutError:
+                return None
+            finally:
+                pending_codes.pop(chat_id, None)
+
+        async with login_running:
+            await message.answer(texts.IGLOGIN_START)
+            try:
+                sessionid = await auth.interactive_login(ask_code)
+            except InstagramLoginError as exc:
+                await message.answer(texts.IGLOGIN_FAILED[exc.problem.value])
+                return
+        await message.answer(texts.iglogin_ok(sessionid))
 
     @router.callback_query(F.data == keyboards.HELP_DATA)
     async def help_cb(callback: CallbackQuery) -> None:
@@ -43,6 +86,12 @@ def build_router(pipeline: Pipeline, store: FileStore, settings: Settings) -> Ro
         if message.from_user is None:
             return
         text = message.text or message.caption
+        future = pending_codes.get(message.chat.id)
+        if future is not None and not future.done() and text and re.fullmatch(r"\s*\d{4,8}\s*", text):
+            # Это код подтверждения для /iglogin, а не ссылка.
+            future.set_result(text.strip())
+            await message.answer(texts.IGLOGIN_CODE_RECEIVED)
+            return
 
         async def open_status(initial: str) -> TelegramStatus:
             return await TelegramStatus.open(message, initial)

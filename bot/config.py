@@ -39,6 +39,14 @@ def _bool(name: str, default: bool) -> bool:
     return raw in {"1", "true", "yes", "on", "да"}
 
 
+def _ids(name: str) -> frozenset[int]:
+    raw = os.getenv(name, "").replace(";", ",")
+    try:
+        return frozenset(int(x) for x in raw.split(",") if x.strip())
+    except ValueError as exc:
+        raise ConfigError(f"{name}: укажите числовые Telegram ID через запятую") from exc
+
+
 def _opt(name: str) -> str | None:
     value = os.getenv(name, "").strip()
     return value or None
@@ -64,6 +72,7 @@ class Settings:
     send_audio: bool = True
     instagram_username: str | None = None
     instagram_password: str | None = None
+    admin_ids: frozenset[int] = frozenset()
     mode: str = "polling"  # polling | webhook
     webhook_base_url: str | None = None
     webhook_secret: str | None = None
@@ -146,6 +155,7 @@ class Settings:
             send_audio=_bool("SEND_AUDIO", True),
             instagram_username=_opt("INSTAGRAM_USERNAME"),
             instagram_password=os.getenv("INSTAGRAM_PASSWORD") or None,
+            admin_ids=_ids("ADMIN_IDS"),
         )
 
 

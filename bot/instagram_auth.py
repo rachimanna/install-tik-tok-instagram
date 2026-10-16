@@ -1,34 +1,44 @@
 """Вход в служебный аккаунт Instagram по логину и паролю владельца бота (для сторис).
 
-Используется, когда cookies нельзя выгрузить вручную (например, с iPhone Safari
+Используется, когда cookies нельзя выгрузить вручную (например, на iPhone Safari
 скрывает HttpOnly-cookie sessionid). Логин и пароль задаёт владелец бота в переменных
 окружения; у пользователей бот пароли не спрашивает.
 
-Вход выполняет instaloader (https://github.com/instaloader/instaloader, 4.15.4):
-Instaloader.login() получает сессию requests с cookie sessionid, которую мы
-сохраняем в cookies.txt для yt-dlp. Вход делается лениво — при первой ссылке на
-сторис, — повторно только когда сессия устарела, и не чаще одного раза в
-LOGIN_COOLDOWN секунд, чтобы частые входы с сервера не привели к блокировке.
+Вход выполняет instagrapi (https://github.com/subzeroid/instagrapi, 3.0.25). С
+сервера Instagram почти всегда просит подтвердить вход кодом из почты или SMS;
+instagrapi в этот момент вызывает challenge_code_handler(username, choice) и ждёт код.
+Поэтому вход бывает двух видов:
+* автоматический (при ссылке на сторис) — без кода: если Instagram требует код,
+  вход не удаётся, и бот просит владельца отправить /iglogin;
+* по команде /iglogin — бот спрашивает код у владельца в Telegram и ждёт ответа.
+
+После входа sessionid сохраняется в cookies.txt для yt-dlp. Автоматические попытки —
+не чаще раза в LOGIN_COOLDOWN секунд, чтобы частые входы не привели к блокировке.
 """
 
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import io
 import logging
 import os
 import time
+from collections.abc import Awaitable, Callable
 from enum import Enum
 from pathlib import Path
 
 log = logging.getLogger(__name__)
 
 LOGIN_COOLDOWN = 600
+CODE_WAIT_SECONDS = 300
 
 
 class LoginProblem(str, Enum):
     BAD_CREDENTIALS = "bad_credentials"
     TWO_FACTOR = "two_factor"
-    CHECKPOINT = "checkpoint"
+    CHECKPOINT = "checkpoint"  # Instagram требует код подтверждения
+    CODE_TIMEOUT = "code_timeout"
     BLOCKED = "blocked"
     OTHER = "other"
 
@@ -37,9 +47,8 @@ class LoginProblem(str, Enum):
 OWNER_HINTS = {
     LoginProblem.BAD_CREDENTIALS: "неверный логин или пароль в INSTAGRAM_USERNAME / INSTAGRAM_PASSWORD",
     LoginProblem.TWO_FACTOR: "на служебном аккаунте включена двухфакторная аутентификация — отключите её",
-    LoginProblem.CHECKPOINT: ("Instagram просит подтвердить вход: откройте приложение Instagram в служебном "
-                              "аккаунте и нажмите «Это был я», затем пришлите боту ссылку на сторис снова "
-                              f"(не раньше чем через {LOGIN_COOLDOWN // 60} мин)"),
+    LoginProblem.CHECKPOINT: "Instagram просит код подтверждения — отправьте боту команду /iglogin",
+    LoginProblem.CODE_TIMEOUT: "код подтверждения не пришёл вовремя — отправьте /iglogin ещё раз",
     LoginProblem.BLOCKED: "Instagram временно ограничил вход с IP сервера — попробуйте позже",
     LoginProblem.OTHER: "вход не удался, подробности выше в логе",
 }
@@ -51,63 +60,88 @@ class InstagramLoginError(Exception):
         self.problem = problem
 
 
-def _classify(exc: Exception) -> LoginProblem:
-    from instaloader.exceptions import (BadCredentialsException, ConnectionException,
-                                        TooManyRequestsException, TwoFactorAuthRequiredException)
+def _classify(exc: Exception, code_missing: bool) -> LoginProblem:
+    from instagrapi.exceptions import (BadPassword, ChallengeError, PleaseWaitFewMinutes,
+                                       TwoFactorRequired)
     text = str(exc).lower()
-    if isinstance(exc, BadCredentialsException):
+    if isinstance(exc, BadPassword):
         return LoginProblem.BAD_CREDENTIALS
-    if isinstance(exc, TwoFactorAuthRequiredException):
+    if isinstance(exc, TwoFactorRequired):
         return LoginProblem.TWO_FACTOR
-    if "checkpoint" in text or "challenge" in text:
+    if isinstance(exc, ChallengeError) or "challenge" in text or "checkpoint" in text:
+        if code_missing:
+            return LoginProblem.CODE_TIMEOUT
         return LoginProblem.CHECKPOINT
-    if isinstance(exc, TooManyRequestsException) or "blocked ip" in text or "429" in text:
+    if isinstance(exc, PleaseWaitFewMinutes) or "429" in text or "wait a few minutes" in text:
         return LoginProblem.BLOCKED
-    if "does not exist" in text:
-        return LoginProblem.BAD_CREDENTIALS
-    if isinstance(exc, ConnectionException):
-        return LoginProblem.OTHER
     return LoginProblem.OTHER
 
 
-def login_to_cookies_file(username: str, password: str, target: Path) -> Path:
-    """Блокирующий вход через instaloader; результат — cookies.txt (права 600)."""
-    import instaloader
+CodeProvider = Callable[[str], "str | None"]
 
-    loader = instaloader.Instaloader(quiet=True, max_connection_attempts=1, request_timeout=30,
-                                     download_pictures=False, download_videos=False,
-                                     save_metadata=False, compress_json=False)
+
+def login_to_cookies_file(username: str, password: str, target: Path,
+                          code_provider: CodeProvider | None = None) -> Path:
+    """Блокирующий вход через instagrapi; результат — cookies.txt (права 600).
+
+    code_provider(канал) вызывается, если Instagram просит код («email» или «sms»);
+    возвращает код или None. Без code_provider вход с проверкой кодом не удаётся.
+    """
+    from instagrapi import Client
+    from instagrapi.mixins.challenge import ChallengeChoice
+
+    from .config import instagram_cookies_to_netscape
+
+    client = Client()
+    device_file = target.with_name("instagram_device.json")
+    if device_file.is_file():
+        # Тот же «телефон», что и при прошлом входе: Instagram реже просит подтверждение.
+        with contextlib.suppress(Exception):
+            client.load_settings(device_file)
+    code_missing = {"value": False}  # код спрашивали у владельца, но он не пришёл
+
+    def handler(_username: str, choice) -> str:
+        if code_provider is None:
+            return ""
+        channel = "sms" if choice == ChallengeChoice.SMS else "email"
+        code = (code_provider(channel) or "").strip()
+        code_missing["value"] = not code
+        return code
+
+    client.challenge_code_handler = handler
     try:
-        loader.login(username, password)
-        # Сессия хранится во внутреннем поле контекста — так её сохраняет и сам
-        # instaloader (InstaloaderContext.save_session берёт self._session.cookies).
-        cookies = loader.context._session.cookies  # noqa: SLF001
+        # instagrapi печатает введённый код в stdout — не пускаем его в логи.
+        with contextlib.redirect_stdout(io.StringIO()):
+            client.login(username, password)
+        sessionid = client.sessionid
     except Exception as exc:  # noqa: BLE001 — разбираем ниже
-        raise InstagramLoginError(_classify(exc), type(exc).__name__) from exc
-    finally:
-        try:
-            loader.close()
-        except Exception:  # noqa: BLE001
-            pass
-
-    expires = int(time.time()) + 365 * 24 * 3600
-    lines = ["# Netscape HTTP Cookie File"]
-    names = set()
-    for cookie in cookies:
-        if "instagram.com" not in (cookie.domain or "") or not cookie.value:
-            continue
-        if any(c in cookie.value for c in "\t\r\n"):
-            continue
-        names.add(cookie.name)
-        lines.append(f".instagram.com\tTRUE\t/\tTRUE\t{cookie.expires or expires}\t{cookie.name}\t{cookie.value}")
-    if "sessionid" not in names:
+        raise InstagramLoginError(_classify(exc, code_missing["value"]), type(exc).__name__) from exc
+    if not sessionid:
         raise InstagramLoginError(LoginProblem.OTHER, "no sessionid after login")
 
     target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w", encoding="utf-8") as fh:
-        fh.write("\n".join(lines) + "\n")
+    _write_private(target, instagram_cookies_to_netscape(f"sessionid={sessionid}"))
+    with contextlib.suppress(Exception):
+        client.dump_settings(device_file)
+        os.chmod(device_file, 0o600)
     return target
+
+
+def _write_private(path: Path, text: str) -> None:
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        fh.write(text)
+
+
+def sessionid_from_cookies(path: Path) -> str | None:
+    for line in path.read_text(encoding="utf-8").splitlines():
+        fields = line.split("\t")
+        if len(fields) == 7 and fields[5] == "sessionid":
+            return fields[6]
+    return None
+
+
+AskCode = Callable[[str], Awaitable["str | None"]]
 
 
 class InstagramAuth:
@@ -128,10 +162,10 @@ class InstagramAuth:
         return self.path if self._ready else None
 
     async def ensure(self) -> Path:
-        """Путь к cookies.txt с действующей сессией. Бросает InstagramLoginError."""
+        """Путь к cookies.txt с действующей сессией (автоматический вход без кода)."""
         async with self._lock:
             if not self._ready:
-                await self._login_locked()
+                await self._login_locked(None)
             return self.path
 
     async def relogin(self) -> bool:
@@ -139,18 +173,38 @@ class InstagramAuth:
         async with self._lock:
             if self._last_attempt is not None and self._clock() - self._last_attempt < LOGIN_COOLDOWN:
                 return False
-            await self._login_locked()
+            self._ready = False
+            await self._login_locked(None)
             return True
 
-    async def _login_locked(self) -> None:
+    async def interactive_login(self, ask_code: AskCode) -> str:
+        """Вход по команде владельца: если Instagram попросит код, спросить его через ask_code.
+
+        Возвращает sessionid (владелец может сохранить его в INSTAGRAM_COOKIES)."""
+        loop = asyncio.get_running_loop()
+
+        def provider(channel: str) -> str | None:
+            future = asyncio.run_coroutine_threadsafe(ask_code(channel), loop)
+            try:
+                return future.result(timeout=CODE_WAIT_SECONDS + 30)
+            except Exception:  # noqa: BLE001 — нет кода: instagrapi сообщит об ошибке
+                future.cancel()
+                return None
+
+        async with self._lock:
+            self._ready = False
+            await self._login_locked(provider, respect_cooldown=False)
+            return sessionid_from_cookies(self.path) or ""
+
+    async def _login_locked(self, provider: CodeProvider | None, *, respect_cooldown: bool = True) -> None:
         now = self._clock()
-        if self._last_attempt is not None and now - self._last_attempt < LOGIN_COOLDOWN:
-            if self._last_error is not None:
-                raise self._last_error
+        if (respect_cooldown and self._last_attempt is not None
+                and now - self._last_attempt < LOGIN_COOLDOWN and self._last_error is not None):
+            raise self._last_error
         self._last_attempt = now
         self._ready = False
         try:
-            await asyncio.to_thread(self._login, self._username, self._password, self.path)
+            await asyncio.to_thread(self._login, self._username, self._password, self.path, provider)
         except InstagramLoginError as exc:
             self._last_error = exc
             log.warning("Instagram login failed (%s): %s", exc.problem.value, OWNER_HINTS[exc.problem])

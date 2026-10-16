@@ -108,6 +108,7 @@ async def main() -> None:
         await bot.set_my_commands([
             BotCommand(command="start", description="Начать"),
             BotCommand(command="help", description="Как пользоваться"),
+            BotCommand(command="iglogin", description="Вход в Instagram для сторис (для администратора)"),
         ])
         me = await bot.get_me()
         log.info("Bot @%s started (%s), upload limit %d MB", me.username, settings.mode,
