@@ -46,7 +46,8 @@ class LoginProblem(str, Enum):
 # Подсказки владельцу бота — пишутся в лог Render.
 OWNER_HINTS = {
     LoginProblem.BAD_CREDENTIALS: "неверный логин или пароль в INSTAGRAM_USERNAME / INSTAGRAM_PASSWORD",
-    LoginProblem.TWO_FACTOR: "на служебном аккаунте включена двухфакторная аутентификация — отключите её",
+    LoginProblem.TWO_FACTOR: ("Instagram не принял код двухэтапной проверки — проверьте, не включена ли "
+                              "двухфакторная аутентификация, и повторите /iglogin"),
     LoginProblem.CHECKPOINT: "Instagram просит код подтверждения — отправьте боту команду /iglogin",
     LoginProblem.CODE_TIMEOUT: "код подтверждения не пришёл вовремя — отправьте /iglogin ещё раз",
     LoginProblem.BLOCKED: "Instagram временно ограничил вход с IP сервера — попробуйте позже",
@@ -60,17 +61,24 @@ class InstagramLoginError(Exception):
         self.problem = problem
 
 
-def _classify(exc: Exception, code_missing: bool) -> LoginProblem:
+def _short(exc: Exception) -> str:
+    from .redact import redact
+    return redact(" ".join(str(exc).split()))[:600]
+
+
+def _classify(exc: Exception, code_missing: bool, interactive: bool = False) -> LoginProblem:
     from instagrapi.exceptions import (BadPassword, ChallengeError, PleaseWaitFewMinutes,
                                        TwoFactorRequired)
     text = str(exc).lower()
     if isinstance(exc, BadPassword):
         return LoginProblem.BAD_CREDENTIALS
+    if code_missing:
+        return LoginProblem.CODE_TIMEOUT
     if isinstance(exc, TwoFactorRequired):
-        return LoginProblem.TWO_FACTOR
+        # Автоматический вход не может спросить код — нужен /iglogin. Если код уже вводили
+        # через /iglogin и Instagram его не принял — это «неверный код / другой способ».
+        return LoginProblem.TWO_FACTOR if interactive else LoginProblem.CHECKPOINT
     if isinstance(exc, ChallengeError) or "challenge" in text or "checkpoint" in text:
-        if code_missing:
-            return LoginProblem.CODE_TIMEOUT
         return LoginProblem.CHECKPOINT
     if isinstance(exc, PleaseWaitFewMinutes) or "429" in text or "wait a few minutes" in text:
         return LoginProblem.BLOCKED
@@ -109,13 +117,30 @@ def login_to_cookies_file(username: str, password: str, target: Path,
         return code
 
     client.challenge_code_handler = handler
+    from instagrapi.exceptions import TwoFactorRequired
+
     try:
         # instagrapi печатает введённый код в stdout — не пускаем его в логи.
         with contextlib.redirect_stdout(io.StringIO()):
-            client.login(username, password)
+            try:
+                client.login(username, password)
+            except TwoFactorRequired:
+                # Новый вход Instagram (CAA) просит «двухэтапную проверку»: instagrapi не вызывает
+                # challenge_code_handler, а ждёт код вторым вызовом login(verification_code=…).
+                if code_provider is None:
+                    raise
+                log.info("Instagram asked for a verification code (two-step verification)")
+                code = (code_provider("2fa") or "").strip()
+                if not code:
+                    code_missing["value"] = True
+                    raise
+                client.login(username, password, verification_code=code)
         sessionid = client.sessionid
     except Exception as exc:  # noqa: BLE001 — разбираем ниже
-        raise InstagramLoginError(_classify(exc, code_missing["value"]), type(exc).__name__) from exc
+        problem = _classify(exc, code_missing["value"], code_provider is not None)
+        # Точная причина — в лог (без пароля и кода), чтобы было видно, что ответил Instagram.
+        log.warning("Instagram login error %s: %s", type(exc).__name__, _short(exc))
+        raise InstagramLoginError(problem, type(exc).__name__) from exc
     if not sessionid:
         raise InstagramLoginError(LoginProblem.OTHER, "no sessionid after login")
 

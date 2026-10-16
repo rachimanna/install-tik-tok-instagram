@@ -24,8 +24,9 @@ MB = 1024 * 1024
 SESSION = "4242424242%3AabcdefGHIJKLmnop%3A12%3AAYdQwerty"
 
 
-def fake_client(monkeypatch, *, error=None, challenge=None, expected_code="123456"):
-    """challenge: None | ChallengeChoice — Instagram просит код по этому каналу."""
+def fake_client(monkeypatch, *, error=None, challenge=None, expected_code="123456", two_step=False):
+    """challenge: None | ChallengeChoice — Instagram просит код по этому каналу.
+    two_step — новый вход Instagram: TwoFactorRequired, код передаётся вторым login()."""
     state = {"logins": [], "loaded": [], "dumped": []}
 
     class FakeClient:
@@ -41,10 +42,16 @@ def fake_client(monkeypatch, *, error=None, challenge=None, expected_code="12345
             path.write_text("{}")
             state["dumped"].append(path)
 
-        def login(self, username, password):
-            state["logins"].append((username, password))
+        def login(self, username, password, verification_code=""):
+            state["logins"].append((username, password, verification_code))
             if error:
                 raise error
+            if two_step:
+                if not verification_code:
+                    raise TwoFactorRequired("Instagram returned a Bloks two-factor context from the CAA "
+                                            "login flow; provide verification_code for login")
+                if verification_code != expected_code:
+                    raise TwoFactorRequired("Invalid verification code")
             if challenge is not None:
                 code = self.challenge_code_handler(username, challenge)
                 print(f'Code entered "{code}" for {username}')  # как делает instagrapi
@@ -67,7 +74,7 @@ def test_login_writes_cookies_for_ytdlp(tmp_path, monkeypatch, capsys):
     state = fake_client(monkeypatch)
     target = tmp_path / "s" / "c.txt"
     login_to_cookies_file("botacc", "secret-pass", target)
-    assert state["logins"] == [("botacc", "secret-pass")]
+    assert state["logins"] == [("botacc", "secret-pass", "")]
     jar = http.cookiejar.MozillaCookieJar(str(target))
     jar.load(ignore_discard=True, ignore_expires=True)
     assert {c.name: c.value for c in jar}["sessionid"] == SESSION
@@ -98,9 +105,46 @@ def test_email_code_is_passed_and_not_printed(tmp_path, monkeypatch, capsys):
     assert "123456" not in capsys.readouterr().out
 
 
+def test_two_step_code_passed_to_second_login(tmp_path, monkeypatch, caplog):
+    state = fake_client(monkeypatch, two_step=True)
+    asked = []
+
+    def provider(channel):
+        asked.append(channel)
+        return "123456"
+
+    login_to_cookies_file("u", "p", tmp_path / "c.txt", provider)
+    assert asked == ["2fa"]
+    assert [v for _, _, v in state["logins"]] == ["", "123456"]
+
+
+def test_two_step_without_owner_needs_iglogin(tmp_path, monkeypatch):
+    fake_client(monkeypatch, two_step=True)
+    with pytest.raises(InstagramLoginError) as err:
+        login_to_cookies_file("u", "p", tmp_path / "c.txt")
+    assert err.value.problem is LoginProblem.CHECKPOINT
+
+
+def test_two_step_wrong_code(tmp_path, monkeypatch, caplog):
+    fake_client(monkeypatch, two_step=True)
+    with pytest.raises(InstagramLoginError) as err:
+        login_to_cookies_file("u", "secret-pass", tmp_path / "c.txt", lambda c: "000000")
+    assert err.value.problem is LoginProblem.TWO_FACTOR
+    # Точная причина видна в логе, а пароль и код — нет.
+    assert "TwoFactorRequired: Invalid verification code" in caplog.text
+    assert "secret-pass" not in caplog.text and "000000" not in caplog.text
+
+
+def test_two_step_code_timeout(tmp_path, monkeypatch):
+    fake_client(monkeypatch, two_step=True)
+    with pytest.raises(InstagramLoginError) as err:
+        login_to_cookies_file("u", "p", tmp_path / "c.txt", lambda c: None)
+    assert err.value.problem is LoginProblem.CODE_TIMEOUT
+
+
 @pytest.mark.parametrize("error, problem", [
     (BadPassword("The password you entered is incorrect."), LoginProblem.BAD_CREDENTIALS),
-    (TwoFactorRequired("Two-factor authentication required"), LoginProblem.TWO_FACTOR),
+    (TwoFactorRequired("Two-factor authentication required"), LoginProblem.CHECKPOINT),
     (PleaseWaitFewMinutes("Please wait a few minutes before you try again."), LoginProblem.BLOCKED),
 ])
 def test_login_errors_classified(tmp_path, monkeypatch, error, problem):
