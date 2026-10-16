@@ -17,6 +17,11 @@
   thumbnails (image_versions2.candidates) — берём самый большой вариант.
   Для поста только с фото yt-dlp бросает «There is no video in this post», если
   не задан ignore_no_formats_error — включаем его только на время извлечения.
+* Instagram Stories (InstagramStoryIE) требуют входа: без cookies Instagram их не
+  отдаёт. Экстрактор разбирает каждую сторис методом _extract_product, но в результат
+  кладёт только элементы с видео — фото-сторис выбрасываются. Мы перехватываем
+  _extract_product и получаем все сторис по порядку, включая фото. Если в ссылке есть
+  id сторис, оставляем только её (id сравниваем через _pk_to_id, как сам yt-dlp).
 """
 
 from __future__ import annotations
@@ -34,7 +39,7 @@ from yt_dlp.networking import Request
 from yt_dlp.utils import DownloadCancelled
 
 from .. import media
-from ..links import ParsedLink, Platform
+from ..links import LinkKind, ParsedLink, Platform
 from ..net_guard import is_public_ip
 from ..redact import redact
 from .base import (DownloadedMedia, DownloadResult, ErrorCode, MediaKind, ProviderError,
@@ -42,7 +47,8 @@ from .base import (DownloadedMedia, DownloadResult, ErrorCode, MediaKind, Provid
 
 log = logging.getLogger(__name__)
 
-ALLOWED_EXTRACTORS = [r"tiktok", r"instagram"]
+# Имена сравниваются целиком (fullmatch), поэтому экстрактор сторис указан отдельно.
+ALLOWED_EXTRACTORS = [r"tiktok", r"instagram", r"instagram:story"]
 _TOO_LARGE_MARK = "__too_large__"
 _CANCEL_MARK = "__cancelled__"
 _CHUNK = 256 * 1024
@@ -241,8 +247,13 @@ class YtDlpProvider:
         result = DownloadResult(platform=link.platform)
         try:
             with self._ydl_class(self._options(link, workdir, cancel)) as ydl:
-                captured = self._capture_tiktok_item(ydl) if link.platform is Platform.TIKTOK else {}
-                info = self._extract(ydl, link.url)
+                if link.kind is LinkKind.INSTAGRAM_STORY:
+                    info = self._instagram_stories(ydl, link)
+                    captured: dict = {}
+                else:
+                    captured = (self._capture_tiktok_item(ydl)
+                                if link.platform is Platform.TIKTOK else {})
+                    info = self._extract(ydl, link.url)
                 self._collect(ydl, link, info, captured, workdir, cancel, result)
         except ProviderError:
             raise
@@ -320,8 +331,43 @@ class YtDlpProvider:
         ie._extract_web_data_and_status = capture
         return captured
 
+    def _instagram_stories(self, ydl: Any, link: ParsedLink) -> dict:
+        """Все сторис по ссылке (видео и фото) в виде playlist для _collect."""
+        products: list[dict] = []
+        try:
+            ie = ydl.get_info_extractor("InstagramStory")
+            original = ie._extract_product
+        except Exception:  # noqa: BLE001
+            log.warning("InstagramStory capture unavailable")
+            ie = original = None
+
+        if ie is not None:
+            def capture(*args: Any, **kwargs: Any) -> Any:
+                product = original(*args, **kwargs)
+                if isinstance(product, dict):
+                    products.append(product)
+                return product
+
+            ie._extract_product = capture
+
+        info = self._extract(ydl, link.url, allow_empty=True)
+        if not products:
+            if info is None:
+                raise ProviderError(ErrorCode.NOT_FOUND)
+            return info  # перехват не сработал — отдаём то, что вернул yt-dlp (только видео)
+
+        if link.content_id:
+            wanted = _story_id(link.content_id)
+            products = [p for p in products if p.get("id") == wanted]
+            if not products:
+                raise ProviderError(ErrorCode.NOT_FOUND, "story expired or not found")
+        base = {"extractor": "InstagramStory", "extractor_key": "InstagramStory",
+                "webpage_url": link.url, "original_url": link.url}
+        return {"_type": "playlist", "id": link.content_id or "stories", **base,
+                "entries": [{**base, **p} for p in products]}
+
     @staticmethod
-    def _extract(ydl: Any, url: str) -> dict:
+    def _extract(ydl: Any, url: str, allow_empty: bool = False) -> dict | None:
         # Пост только с фото: без этого флага Instagram-экстрактор бросает «no video».
         ydl.params["ignore_no_formats_error"] = True
         try:
@@ -332,9 +378,9 @@ class YtDlpProvider:
                 info = ydl.extract_info(info["url"], download=False, process=False)
         finally:
             ydl.params["ignore_no_formats_error"] = False
-        if not info:
+        if not info and not allow_empty:
             raise ProviderError(ErrorCode.NOT_FOUND)
-        return info
+        return info or None
 
     def _add_photo(self, ydl: Any, platform: Platform, image: dict, stem: str, workdir: Path,
                    cancel: threading.Event, result: DownloadResult) -> None:
@@ -459,6 +505,14 @@ class YtDlpProvider:
             title=processed.get("title"),
             author=processed.get("uploader") or processed.get("channel") or processed.get("uploader_id"),
         )
+
+
+def _story_id(pk: str) -> str | None:
+    try:
+        from yt_dlp.extractor.instagram import _pk_to_id
+        return _pk_to_id(pk)
+    except Exception:  # noqa: BLE001
+        return None
 
 
 def _has_video_formats(entry: dict) -> bool:

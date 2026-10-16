@@ -10,7 +10,9 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from enum import Enum
-from urllib.parse import urlsplit, urlunsplit
+import base64
+import binascii
+from urllib.parse import parse_qs, urlsplit, urlunsplit
 
 
 class Platform(str, Enum):
@@ -39,7 +41,6 @@ class LinkErrorCode(str, Enum):
     CREDENTIALS = "credentials"
     BAD_PORT = "bad_port"
     UNSUPPORTED_CONTENT = "unsupported_content"
-    INSTAGRAM_STORY = "instagram_story"
     TOO_LONG = "too_long"
 
 
@@ -80,7 +81,8 @@ _TT_SHORT_HOST_PATH = re.compile(r"^/(?P<id>[\w-]+)/?$")
 
 _IG_MEDIA = re.compile(r"^(?:/[\w.]+)?/(?P<kind>p|tv|reels?)/(?P<id>[\w-]+)/?$")
 _IG_SHARE = re.compile(r"^/share/(?:(?:reel|p)/)?[\w-]+/?$")
-_IG_STORY = re.compile(r"^/stories/")
+_IG_STORY = re.compile(r"^/stories/(?P<user>[\w.]+)(?:/(?P<id>\d+))?/?$")
+_IG_STORY_SHORT = re.compile(r"^/s/(?P<code>[A-Za-z0-9_=-]+)/?$")
 
 
 def extract_url(text: str | None) -> str | None:
@@ -134,7 +136,7 @@ def parse_link(url: str, original: str | None = None) -> ParsedLink:
     if _host_matches(host, TIKTOK_DOMAIN):
         return _parse_tiktok(host, path, parts.query, original)
     if _host_matches(host, INSTAGRAM_DOMAIN):
-        return _parse_instagram(path, original)
+        return _parse_instagram(path, parts.query, original)
     raise LinkError(LinkErrorCode.DOMAIN_NOT_ALLOWED, host)
 
 
@@ -166,9 +168,39 @@ def _parse_tiktok(host: str, path: str, query: str, original: str) -> ParsedLink
     raise LinkError(LinkErrorCode.UNSUPPORTED_CONTENT, path)
 
 
-def _parse_instagram(path: str, original: str) -> ParsedLink:
-    if _IG_STORY.match(path):
-        raise LinkError(LinkErrorCode.INSTAGRAM_STORY)
+def _story(user: str, story_id: str | None, original: str) -> ParsedLink:
+    if user == "highlights" and not story_id:
+        raise LinkError(LinkErrorCode.UNSUPPORTED_CONTENT, "highlight without id")
+    path = f"/stories/{user}/{story_id}/" if story_id else f"/stories/{user}/"
+    return ParsedLink(Platform.INSTAGRAM, LinkKind.INSTAGRAM_STORY,
+                      f"https://www.instagram.com{path}", original,
+                      None if user == "highlights" else story_id)
+
+
+def _parse_instagram(path: str, query: str, original: str) -> ParsedLink:
+    if path.startswith("/stories/"):
+        m = _IG_STORY.match(path)
+        if not m:
+            raise LinkError(LinkErrorCode.UNSUPPORTED_CONTENT, path)
+        # /stories/<user>/<id>/ — одна сторис; /stories/<user>/ — все текущие сторис;
+        # /stories/highlights/<id>/ — подборка «Актуальное».
+        return _story(m.group("user"), m.group("id"), original)
+
+    if m := _IG_STORY_SHORT.match(path):
+        # Ссылка «Поделиться» на «Актуальное»: /s/<base64("highlight:<id>")>?story_media_id=<pk>_<user>
+        code = m.group("code")
+        try:
+            decoded = base64.urlsafe_b64decode(code + "=" * (-len(code) % 4)).decode("ascii")
+        except (binascii.Error, UnicodeDecodeError, ValueError) as exc:
+            raise LinkError(LinkErrorCode.UNSUPPORTED_CONTENT, "bad /s/ code") from exc
+        hm = re.fullmatch(r"highlight:(\d+)", decoded)
+        if not hm:
+            raise LinkError(LinkErrorCode.UNSUPPORTED_CONTENT, "unknown /s/ link")
+        link = _story("highlights", hm.group(1), original)
+        media = (parse_qs(query).get("story_media_id") or [""])[0].split("_")[0]
+        if media.isdigit():
+            link = ParsedLink(link.platform, link.kind, link.url, original, media)
+        return link
 
     if _IG_SHARE.match(path):
         url = urlunsplit(("https", "www.instagram.com", path, "", ""))

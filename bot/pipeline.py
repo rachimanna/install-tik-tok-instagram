@@ -22,7 +22,7 @@ from . import media, texts
 from .config import Settings
 from .file_store import FileStore
 from .limits import UserLimiter
-from .links import LinkError, ParsedLink, extract_url, parse_link
+from .links import LinkError, LinkKind, ParsedLink, extract_url, parse_link
 from .net_guard import Fetcher, HostChecker, ResolveError, UnsafeAddressError, ensure_public_host, resolve_link
 from .providers import (AudioTrack, DownloadedMedia, DownloadResult, ErrorCode, MediaKind, Provider,
                         ProviderError, pick_provider)
@@ -106,6 +106,8 @@ class Pipeline:
             log.info("Rejected link: %s", exc.code.value)
             return texts.LINK_ERRORS[exc.code]
 
+        if link.kind is LinkKind.INSTAGRAM_STORY and not self.settings.ytdlp_cookies_file:
+            return texts.INSTAGRAM_STORIES_DISABLED
         if not self.limiter.try_acquire(user_id):
             return texts.BUSY
         try:
@@ -139,8 +141,9 @@ class Pipeline:
             await status.finish(texts.RESOLVE_ERRORS[exc.reason], source)
         except ProviderError as exc:
             log.info("Provider error %s for %s", exc.code.value, redact_url(link.url))
-            await status.finish(texts.provider_error(exc.code, link.platform,
-                                                     self.settings.max_upload_bytes, exc.size), source)
+            await status.finish(texts.provider_error(
+                exc.code, link.platform, self.settings.max_upload_bytes, exc.size,
+                story=link.kind is LinkKind.INSTAGRAM_STORY), source)
         except SendTooLarge:
             await status.finish(texts.provider_error(ErrorCode.TOO_LARGE, link.platform,
                                                      self.settings.max_upload_bytes), source)

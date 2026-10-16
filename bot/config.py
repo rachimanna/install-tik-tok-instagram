@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import base64
+import binascii
 import hashlib
 import os
 from dataclasses import dataclass
@@ -91,10 +93,8 @@ class Settings:
         upload_cap = 2000 if api_url else 50
         upload_mb = min(_int("MAX_UPLOAD_MB", 50), upload_cap)
 
-        cookies = _opt("YTDLP_COOKIES_FILE")
-        cookies_path = Path(cookies).expanduser() if cookies else None
-        if cookies_path and not cookies_path.is_file():
-            raise ConfigError("YTDLP_COOKIES_FILE указывает на несуществующий файл")
+        work_dir = Path(os.getenv("WORK_DIR", "./data")).expanduser().resolve()
+        cookies_path = _cookies_file(work_dir)
 
         mode = os.getenv("BOT_MODE", "polling").strip().lower() or "polling"
         if mode not in ("polling", "webhook"):
@@ -122,10 +122,41 @@ class Settings:
             max_items_per_post=_int("MAX_ITEMS_PER_POST", 20),
             file_ttl_seconds=_int("FILE_TTL_MINUTES", 60) * 60,
             cache_max_bytes=_int("CACHE_MAX_MB", 2000) * MB,
-            work_dir=Path(os.getenv("WORK_DIR", "./data")).expanduser().resolve(),
+            work_dir=work_dir,
             tiktok_allow_watermark_fallback=_bool("TIKTOK_ALLOW_WATERMARK_FALLBACK", True),
             ytdlp_cookies_file=cookies_path,
             ytdlp_proxy=_opt("YTDLP_PROXY"),
             log_level=os.getenv("LOG_LEVEL", "INFO").strip().upper() or "INFO",
             send_audio=_bool("SEND_AUDIO", True),
         )
+
+
+def _cookies_file(work_dir: Path) -> Path | None:
+    """cookies.txt служебного аккаунта: файлом (YTDLP_COOKIES_FILE) или в base64 (YTDLP_COOKIES_B64).
+
+    Второй способ нужен для хостингов, где секретный файл не читается из контейнера
+    с непривилегированным пользователем. Файл пишется с правами 600.
+    """
+    path_value = _opt("YTDLP_COOKIES_FILE")
+    b64_value = _opt("YTDLP_COOKIES_B64")
+    if path_value:
+        path = Path(path_value).expanduser()
+        if not path.is_file():
+            raise ConfigError("YTDLP_COOKIES_FILE указывает на несуществующий файл")
+        if not os.access(path, os.R_OK):
+            raise ConfigError("YTDLP_COOKIES_FILE: нет прав на чтение файла (используйте YTDLP_COOKIES_B64)")
+        return path
+    if not b64_value:
+        return None
+    try:
+        data = base64.b64decode("".join(b64_value.split()), validate=True).decode("utf-8")
+    except (binascii.Error, UnicodeDecodeError, ValueError) as exc:
+        raise ConfigError("YTDLP_COOKIES_B64: это не base64 от файла cookies.txt") from exc
+    if "instagram.com" not in data and "tiktok.com" not in data:
+        raise ConfigError("YTDLP_COOKIES_B64: в файле нет cookies instagram.com или tiktok.com")
+    target = work_dir / "secrets" / "cookies.txt"
+    target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        fh.write(data)
+    return target

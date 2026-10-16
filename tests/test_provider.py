@@ -299,7 +299,7 @@ def test_cookie_file_is_copied_not_modified(tmp_path):
     work.mkdir()
     opts = YtDlpProvider(max_bytes=MB, cookies_file=cookies)._options(TT, work, threading.Event())
     assert opts["cookiefile"] == str(work / "cookies.txt")
-    assert opts["allowed_extractors"] == ["tiktok", "instagram"]
+    assert opts["allowed_extractors"] == ["tiktok", "instagram", "instagram:story"]
 
 
 def test_capture_hooks_real_tiktok_extractor():

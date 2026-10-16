@@ -12,6 +12,7 @@ START = (
     "👋 Привет! Отправь ссылку на видео из TikTok или Instagram.\n\n"
     "🎬 Reels и видео\n"
     "🖼 Фото и карусели\n"
+    "📲 Сторис Instagram — видео и фото\n"
     "🎵 Звук из видео отдельным аудиофайлом\n"
     "✨ TikTok без водяного знака — когда доступна чистая версия\n"
     "📱 TikTok Stories — если они доступны для скачивания\n"
@@ -28,10 +29,12 @@ HELP = (
     "<b>Поддерживается</b>\n"
     "• TikTok: видео и фото-посты (полные и короткие ссылки vm.tiktok.com), сторис — "
     "пока она доступна и если TikTok отдаёт её загрузчику\n"
-    "• Instagram: Reels, видео и фото из публичных публикаций, включая карусели\n\n"
+    "• Instagram: Reels, видео и фото из публичных публикаций, включая карусели\n"
     "<b>Не поддерживается</b>\n"
-    "• закрытые аккаунты и удалённые публикации\n"
-    "• сторис Instagram\n\n"
+    "• закрытые аккаунты и удалённые публикации\n\n"
+    "<b>Сторис Instagram</b>\n"
+    "Видео и фото из сторис и «Актуального» — если администратор подключил аккаунт бота. "
+    "Сторис живут 24 часа.\n\n"
     "<b>Ограничения</b>\n"
     "• размер файла — до {limit} (ограничение Telegram для ботов)\n"
     "• оригинальный файл хранится {ttl} мин после загрузки\n\n"
@@ -67,9 +70,6 @@ LINK_ERRORS: dict[LinkErrorCode, str] = {
     LinkErrorCode.UNSUPPORTED_CONTENT: (
         "⚠️ Это не ссылка на конкретное видео. Пришли ссылку на ролик, Reels или публикацию."
     ),
-    LinkErrorCode.INSTAGRAM_STORY: (
-        "😔 Сторис Instagram не поддерживаются: для них нужен вход в аккаунт."
-    ),
 }
 
 RESOLVE_ERRORS = {
@@ -78,10 +78,22 @@ RESOLVE_ERRORS = {
     "too_many_redirects": "⚠️ Ссылка ведёт по слишком длинной цепочке переадресаций.",
 }
 
+INSTAGRAM_STORIES_DISABLED = (
+    "📱 Сторис Instagram открываются только после входа в аккаунт, а администратор бота "
+    "ещё не подключил аккаунт. Посты, Reels и фото работают без этого."
+)
+
 UNSAFE_ADDRESS = "⚠️ Эта ссылка ведёт на недопустимый адрес."
 
 
-def provider_error(code: ErrorCode, platform: Platform, limit: int, size: int | None = None) -> str:
+def provider_error(code: ErrorCode, platform: Platform, limit: int, size: int | None = None,
+                   *, story: bool = False) -> str:
+    if story and platform is Platform.INSTAGRAM:
+        if code is ErrorCode.NOT_FOUND:
+            return "😔 Сторис не найдена: сторис живут 24 часа, возможно, она уже исчезла."
+        if code in (ErrorCode.PRIVATE, ErrorCode.LOGIN_REQUIRED):
+            return ("🔒 Не удалось открыть сторис: профиль закрыт для аккаунта бота "
+                    "или вход в аккаунт бота устарел.")
     if code is ErrorCode.NOT_FOUND:
         if platform is Platform.TIKTOK:
             return ("😔 Видео недоступно: оно удалено, скрыто автором, или это сторис, "

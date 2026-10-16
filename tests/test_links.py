@@ -68,7 +68,8 @@ def test_tiktok_video_path_is_not_assumed_to_be_regular_video():
     ("http://[::1]/", LinkErrorCode.BAD_HOST),
     ("https://localhost/@u/video/1", LinkErrorCode.DOMAIN_NOT_ALLOWED),
     ("https://xn--tktok-3ra.com/@u/video/1", LinkErrorCode.DOMAIN_NOT_ALLOWED),
-    ("https://www.instagram.com/stories/user/123/", LinkErrorCode.INSTAGRAM_STORY),
+    ("https://www.instagram.com/stories/highlights/", LinkErrorCode.UNSUPPORTED_CONTENT),
+    ("https://www.instagram.com/s/bm90LWEtaGlnaGxpZ2h0/", LinkErrorCode.UNSUPPORTED_CONTENT),
     ("https://www.instagram.com/someuser/", LinkErrorCode.UNSUPPORTED_CONTENT),
     ("https://www.tiktok.com/@someuser", LinkErrorCode.UNSUPPORTED_CONTENT),
     ("https://www.tiktok.com/" + "a" * 3000, LinkErrorCode.TOO_LONG),
@@ -83,3 +84,19 @@ def test_unicode_host_rejected():
     with pytest.raises(LinkError) as err:
         parse_link("https://tіktok.com/@u/video/1")  # кириллическая «і»
     assert err.value.code in (LinkErrorCode.BAD_HOST, LinkErrorCode.DOMAIN_NOT_ALLOWED)
+
+
+@pytest.mark.parametrize("url, normalized, content_id", [
+    ("https://www.instagram.com/stories/some.user/3412345678901234567/?igsh=abc",
+     "https://www.instagram.com/stories/some.user/3412345678901234567/", "3412345678901234567"),
+    ("https://instagram.com/stories/some.user", "https://www.instagram.com/stories/some.user/", None),
+    ("https://www.instagram.com/stories/highlights/17900000000000000/",
+     "https://www.instagram.com/stories/highlights/17900000000000000/", None),
+    # «Поделиться» из «Актуального»: base64("highlight:17900000000000000")
+    ("https://www.instagram.com/s/aGlnaGxpZ2h0OjE3OTAwMDAwMDAwMDAwMDAw?story_media_id=3412345678901234567_123&igsh=x",
+     "https://www.instagram.com/stories/highlights/17900000000000000/", "3412345678901234567"),
+])
+def test_instagram_story_links(url, normalized, content_id):
+    link = parse_link(url)
+    assert link.kind is LinkKind.INSTAGRAM_STORY
+    assert (link.url, link.content_id) == (normalized, content_id)
