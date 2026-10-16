@@ -5,7 +5,10 @@ from __future__ import annotations
 import base64
 import binascii
 import hashlib
+import json
 import os
+import re
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -139,6 +142,7 @@ def _cookies_file(work_dir: Path) -> Path | None:
     """
     path_value = _opt("YTDLP_COOKIES_FILE")
     b64_value = _opt("YTDLP_COOKIES_B64")
+    pasted = _opt("INSTAGRAM_COOKIES")
     if path_value:
         path = Path(path_value).expanduser()
         if not path.is_file():
@@ -146,17 +150,69 @@ def _cookies_file(work_dir: Path) -> Path | None:
         if not os.access(path, os.R_OK):
             raise ConfigError("YTDLP_COOKIES_FILE: нет прав на чтение файла (используйте YTDLP_COOKIES_B64)")
         return path
-    if not b64_value:
+    if b64_value:
+        try:
+            data = base64.b64decode("".join(b64_value.split()), validate=True).decode("utf-8")
+        except (binascii.Error, UnicodeDecodeError, ValueError) as exc:
+            raise ConfigError("YTDLP_COOKIES_B64: это не base64 от файла cookies.txt") from exc
+        if "instagram.com" not in data and "tiktok.com" not in data:
+            raise ConfigError("YTDLP_COOKIES_B64: в файле нет cookies instagram.com или tiktok.com")
+    elif pasted:
+        data = instagram_cookies_to_netscape(pasted)
+    else:
         return None
-    try:
-        data = base64.b64decode("".join(b64_value.split()), validate=True).decode("utf-8")
-    except (binascii.Error, UnicodeDecodeError, ValueError) as exc:
-        raise ConfigError("YTDLP_COOKIES_B64: это не base64 от файла cookies.txt") from exc
-    if "instagram.com" not in data and "tiktok.com" not in data:
-        raise ConfigError("YTDLP_COOKIES_B64: в файле нет cookies instagram.com или tiktok.com")
     target = work_dir / "secrets" / "cookies.txt"
     target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(fd, "w", encoding="utf-8") as fh:
         fh.write(data)
     return target
+
+
+_COOKIE_NAME = re.compile(r"^[A-Za-z0-9_.-]+$")
+
+
+def instagram_cookies_to_netscape(raw: str) -> str:
+    """INSTAGRAM_COOKIES → cookies.txt. Удобно вставлять с телефона.
+
+    Понимает то, что выдают расширения для экспорта cookies:
+    * строку заголовка: «sessionid=…; csrftoken=…; ds_user_id=…»;
+    * JSON-массив [{"name": …, "value": …, "domain": …}, …];
+    * готовый cookies.txt (формат Netscape);
+    * или просто значение cookie sessionid.
+    Обязателен sessionid — по нему yt-dlp понимает, что вход выполнен.
+    """
+    raw = raw.strip()
+    pairs: list[tuple[str, str]] = []
+    if raw.startswith("["):
+        try:
+            items = json.loads(raw)
+        except ValueError as exc:
+            raise ConfigError("INSTAGRAM_COOKIES: JSON не читается") from exc
+        for item in items if isinstance(items, list) else []:
+            if not isinstance(item, dict):
+                continue
+            domain = str(item.get("domain") or "instagram.com")
+            if "instagram.com" in domain and item.get("name") and item.get("value") is not None:
+                pairs.append((str(item["name"]), str(item["value"])))
+    elif "\t" in raw:
+        for line in raw.splitlines():
+            fields = line.split("\t")
+            if len(fields) == 7 and "instagram.com" in fields[0] and not line.startswith("#"):
+                pairs.append((fields[5], fields[6]))
+    elif "=" in raw:
+        for part in raw.split(";"):
+            name, sep, value = part.strip().partition("=")
+            if sep and name:
+                pairs.append((name.strip(), value.strip()))
+    else:
+        pairs.append(("sessionid", raw))
+
+    pairs = [(n, v) for n, v in pairs
+             if _COOKIE_NAME.match(n) and v and not any(c in v for c in "\t\r\n;")]
+    if not any(n == "sessionid" for n, _ in pairs):
+        raise ConfigError("INSTAGRAM_COOKIES: нет cookie sessionid — войдите в Instagram и скопируйте cookies заново")
+    expires = int(time.time()) + 365 * 24 * 3600
+    lines = ["# Netscape HTTP Cookie File"]
+    lines += [f".instagram.com\tTRUE\t/\tTRUE\t{expires}\t{n}\t{v}" for n, v in dict(pairs).items()]
+    return "\n".join(lines) + "\n"

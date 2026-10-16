@@ -94,7 +94,20 @@ Instagram отдаёт сторис только вошедшему пользо
 - `instagram.com/stories/<user>/` — все текущие сторис пользователя;
 - `instagram.com/stories/highlights/<id>/` и `instagram.com/s/…` — «Актуальное».
 
-Как подключить:
+Как подключить **с iPhone** (без компьютера):
+1. Установите из App Store бесплатное расширение Safari **Cookie-Editor** и включите его:
+   **Настройки → Safari → Расширения → Cookie-Editor**, разрешите доступ к instagram.com.
+2. Откройте в Safari instagram.com и войдите в **отдельный** служебный аккаунт.
+3. Нажмите значок расширений в адресной строке → Cookie-Editor → экспорт в формате
+   **Header string** (строка вида `sessionid=…; csrftoken=…`). Строка скопируется.
+4. Откройте в Safari dashboard.render.com → сервис → **Environment → Add Environment Variable**:
+   имя `INSTAGRAM_COOKIES`, значение — вставьте строку. **Save Changes**.
+
+`INSTAGRAM_COOKIES` принимает строку заголовка, JSON-экспорт расширения, готовый cookies.txt
+или просто значение `sessionid`. Нужна обязательно cookie `sessionid`, иначе бот не запустится
+и напишет об этом в логах.
+
+Как подключить **с компьютера**:
 1. Заведите отдельный аккаунт Instagram. Основной не используйте: Instagram может ограничить
    или заблокировать аккаунт, через который ходит бот.
 2. Войдите в него в браузере на компьютере.

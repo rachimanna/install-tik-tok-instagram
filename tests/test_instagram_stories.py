@@ -174,3 +174,48 @@ def test_cookies_from_base64(tmp_path, monkeypatch):
     monkeypatch.setenv("YTDLP_COOKIES_B64", "не base64")
     with pytest.raises(ConfigError):
         Settings.from_env()
+
+
+@pytest.mark.parametrize("raw", [
+    "sessionid=123%3AabcDEF%3A4; csrftoken=tok; ds_user_id=123",
+    '[{"name":"sessionid","value":"123%3AabcDEF%3A4","domain":".instagram.com"},'
+    '{"name":"csrftoken","value":"tok","domain":".instagram.com"},'
+    '{"name":"other","value":"x","domain":".example.com"}]',
+    "# Netscape HTTP Cookie File\n.instagram.com\tTRUE\t/\tTRUE\t0\tsessionid\t123%3AabcDEF%3A4\n",
+    "  123%3AabcDEF%3A4  ",
+])
+def test_pasted_instagram_cookies(raw, tmp_path, monkeypatch):
+    import http.cookiejar
+    from bot.config import instagram_cookies_to_netscape
+    text = instagram_cookies_to_netscape(raw)
+    path = tmp_path / "c.txt"
+    path.write_text(text)
+    jar = http.cookiejar.MozillaCookieJar(str(path))
+    jar.load(ignore_discard=True, ignore_expires=True)
+    cookies = {c.name: c.value for c in jar}
+    assert cookies["sessionid"] == "123%3AabcDEF%3A4"
+    assert "other" not in cookies
+    assert all(c.domain == ".instagram.com" for c in jar)
+
+    monkeypatch.setenv("BOT_TOKEN", "123456789:" + "A" * 35)
+    monkeypatch.setenv("WORK_DIR", str(tmp_path / "w"))
+    monkeypatch.delenv("YTDLP_COOKIES_FILE", raising=False)
+    monkeypatch.delenv("YTDLP_COOKIES_B64", raising=False)
+    monkeypatch.setenv("INSTAGRAM_COOKIES", raw)
+    assert "sessionid" in Settings.from_env().ytdlp_cookies_file.read_text()
+
+
+@pytest.mark.parametrize("raw", ["csrftoken=tok; mid=x", "[]", '[{"name":"a"}]'])
+def test_pasted_cookies_without_session_rejected(raw):
+    from bot.config import instagram_cookies_to_netscape
+    with pytest.raises(ConfigError):
+        instagram_cookies_to_netscape(raw)
+
+
+def test_pasted_cookies_load_in_real_ytdlp(tmp_path):
+    from bot.config import instagram_cookies_to_netscape
+    path = tmp_path / "c.txt"
+    path.write_text(instagram_cookies_to_netscape("sessionid=1%3Aab%3A2; csrftoken=t"))
+    with yt_dlp.YoutubeDL({"cookiefile": str(path), "quiet": True}) as ydl:
+        ie = ydl.get_info_extractor("InstagramStory")
+        assert ie._is_logged_in  # yt-dlp видит вход по sessionid
