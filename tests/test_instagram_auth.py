@@ -142,6 +142,16 @@ def test_two_step_code_timeout(tmp_path, monkeypatch):
     assert err.value.problem is LoginProblem.CODE_TIMEOUT
 
 
+def test_needs_upgrade_is_unsupported(tmp_path, monkeypatch):
+    from instagrapi.exceptions import UnknownError
+    fake_client(monkeypatch, error=UnknownError(
+        "Your version of Instagram is out of date. Please upgrade your app to log in to Instagram."))
+    with pytest.raises(InstagramLoginError) as err:
+        login_to_cookies_file("u", "p", tmp_path / "c.txt", lambda c: "1")
+    assert err.value.problem is LoginProblem.UNSUPPORTED
+    assert "INSTAGRAM_COOKIES" in texts.IGLOGIN_FAILED["unsupported"]
+
+
 @pytest.mark.parametrize("error, problem", [
     (BadPassword("The password you entered is incorrect."), LoginProblem.BAD_CREDENTIALS),
     (TwoFactorRequired("Two-factor authentication required"), LoginProblem.CHECKPOINT),

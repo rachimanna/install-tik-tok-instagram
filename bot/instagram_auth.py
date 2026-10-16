@@ -40,6 +40,7 @@ class LoginProblem(str, Enum):
     CHECKPOINT = "checkpoint"  # Instagram требует код подтверждения
     CODE_TIMEOUT = "code_timeout"
     BLOCKED = "blocked"
+    UNSUPPORTED = "unsupported"  # Instagram требует проверку, которую библиотека не проходит
     OTHER = "other"
 
 
@@ -51,6 +52,9 @@ OWNER_HINTS = {
     LoginProblem.CHECKPOINT: "Instagram просит код подтверждения — отправьте боту команду /iglogin",
     LoginProblem.CODE_TIMEOUT: "код подтверждения не пришёл вовремя — отправьте /iglogin ещё раз",
     LoginProblem.BLOCKED: "Instagram временно ограничил вход с IP сервера — попробуйте позже",
+    LoginProblem.UNSUPPORTED: ("Instagram требует проверку входа, которую instagrapi не проходит "
+                               "(«version out of date» после двухэтапной проверки) — используйте "
+                               "INSTAGRAM_COOKIES с sessionid из браузера на компьютере"),
     LoginProblem.OTHER: "вход не удался, подробности выше в логе",
 }
 
@@ -70,6 +74,8 @@ def _classify(exc: Exception, code_missing: bool, interactive: bool = False) -> 
     from instagrapi.exceptions import (BadPassword, ChallengeError, PleaseWaitFewMinutes,
                                        TwoFactorRequired)
     text = str(exc).lower()
+    if "out of date" in text or "needs_upgrade" in text:
+        return LoginProblem.UNSUPPORTED
     if isinstance(exc, BadPassword):
         return LoginProblem.BAD_CREDENTIALS
     if code_missing:
